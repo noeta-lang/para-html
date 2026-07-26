@@ -3,8 +3,8 @@ version = 2
 
 [[package]]
 name = "para/html"
-version = "0.1.0"
+version = "0.1.1"
 source = "path"
 path = "../.."
 edition = "2026"
-hash = "f82eed111c8444981ca4169939087fccb5a0137391814b959916fe1ef0356c49"
+hash = "38080249f407187e0bb3757f4bbdab36556caca459a435916a8e3cd3f494cfd4"
