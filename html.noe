@@ -107,6 +107,36 @@ fn in_tag(s: string): bool {
     return segs[segs.len() - 1].index_of(">") == none
 }
 
+// The attribute a hole in *attribute* position sits in: the skeleton so far ends inside an open tag
+// at `… name="`, so the name is the last word before that final `=`. `""` when it cannot be read
+// (an unquoted or otherwise unusual spelling), which downgrades the hole to inline-only — the old
+// behavior, never an error.
+fn attr_name_at(s: string): string {
+    segs = s.split("<")
+    tag = segs[segs.len() - 1].replace("\n", " ").replace("\t", " ")
+    parts = tag.split("=")
+    if parts.len() < 2 {
+        return ""
+    }
+    words = parts[parts.len() - 2].split(" ")
+    return words[words.len() - 1].trim()
+}
+
+// Insert `marker` just before the enclosing tag's `>`, so an attribute-position binding can put a
+// marker on the *element* — it cannot be emitted at the hole itself, which sits inside a quoted
+// attribute value. Returns `s` unchanged when it holds no tag close (the tag continues into a later
+// static, and the caller carries the marker forward).
+fn inject_at_tag_close(s: string, marker: string): string {
+    at = s.index_of(">")
+    if at == none {
+        return s
+    }
+    cut = at ?? 0
+    // A self-closing `/>` keeps its slash after the marker.
+    end = if cut > 0 && s.slice(cut - 1, cut) == "/" then cut - 1 else cut
+    return s.slice(0, end) ~ " ${marker}" ~ s.slice(end)
+}
+
 // Whether a hole value is itself markup (an `Html` from a nested `@html { … }`, or a `List<Html>`
 // from a loop like `${rows.map(...)}`) — such a hole embeds *raw*; every other value is escaped
 // text. This is the JSX rule: `{child}` composes, `{text}` is escaped.
@@ -484,9 +514,19 @@ pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
     mut ids: List<string> = []
     mut handlers: Map<string, (string) -> void> = {}
     mut regions: List<KeyedRegion> = []
+    // Attribute bindings whose element has not closed its tag yet — `aN:name` pairs, emitted as one
+    // `data-live-attr` on the element as soon as a static carries the `>`. Carried rather than
+    // emitted immediately because a hole in attribute position sits inside a quoted value, where no
+    // new attribute can be written; several holes in one tag accumulate here.
+    mut pending_attr = ""
     mut i = 0
     for s in statics {
-        skeleton = skeleton ~ s
+        mut chunk = s
+        if pending_attr != "" && s.index_of(">") != none {
+            chunk = inject_at_tag_close(s, "data-live-attr=\"${pending_attr}\"")
+            pending_attr = ""
+        }
+        skeleton = skeleton ~ chunk
         if i < holes.len() {
             hole = holes[i]
             val = hole()
@@ -528,10 +568,24 @@ pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
                 handlers = handlers.set(hid, b.run)
                 skeleton = skeleton ~ "${wire_attr(b.event)}=\"${hid}\""
             } else if in_tag(skeleton) {
-                // Attribute position: inline the escaped value (no `<span>` — it would be illegal
-                // inside a tag). Its value re-renders with the enclosing region (a row), not on its
-                // own, so it needs no marker id.
+                // Attribute position: inline the escaped value — a `<span>` marker would be illegal
+                // inside a tag — and *also* expose it as its own hole, so the attribute tracks its
+                // signals like any other. The marker naming the binding cannot go here (we are
+                // inside a quoted value), so it is carried to the element's `>` (`pending_attr`).
+                //
+                // Inlining alone used to be the whole story, on the reasoning that such a hole
+                // re-renders with its enclosing region. True inside a keyed row; false everywhere
+                // else, and the page root is not a region — so `value="${draft.get()}"` rendered
+                // once and then never again, and no server-side change could clear an input.
+                attr = attr_name_at(skeleton)
                 skeleton = skeleton ~ attr_escape("${val}")
+                if attr != "" {
+                    c = computed(fn() => attr_escape("${hole()}"))
+                    hid = "a${i}"
+                    ids = ids ~ [hid]
+                    exposed = exposed ~ [c]
+                    pending_attr = if pending_attr == "" then "${hid}:${attr}" else "${pending_attr} ${hid}:${attr}"
+                }
             } else {
                 // Text position: wrap the hole in a `computed` (tracks exactly the signals it reads)
                 // behind a `data-live`/`data-live-html` marker the session exposes and diffs. A folded
@@ -577,11 +631,26 @@ fn live_js(): string {
   const path = window.NOETA_LIVE_PATH || "/ws";
   const state = {};
   let ws = null;
+  const unescapeAttr = (s) => s.replace(/&quot;/g, '"').replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&");
   const render = (name) => {
     const value = state[name];
     const text = typeof value === "string" ? value : JSON.stringify(value);
     document.querySelectorAll('[data-live="' + name + '"]').forEach((el) => { el.textContent = text; });
     document.querySelectorAll('[data-live-html="' + name + '"]').forEach((el) => { el.innerHTML = text; });
+    // Attribute holes: the element carries data-live-attr="aN:name aM:other". The value arrives
+    // attribute-escaped (it was written into a quoted value server-side), so unescape it first.
+    document.querySelectorAll("[data-live-attr]").forEach((el) => {
+      for (const pair of el.dataset.liveAttr.split(" ")) {
+        const [id, attr] = pair.split(":");
+        if (id !== name) continue;
+        const v = unescapeAttr(text);
+        // value/checked are live properties: setting only the attribute leaves what the user
+        // sees untouched once the element has been interacted with.
+        if (attr === "value") { if (el.value !== v) el.value = v; }
+        else if (attr === "checked") { el.checked = v !== "" && v !== "false"; }
+        else el.setAttribute(attr, v);
+      }
+    });
   };
   const apply = (values) => { for (const n of Object.keys(values)) { state[n] = values[n]; render(n); } };
   const anchor = (id) => id === "@end" ? null : document.querySelector('[data-live-html="' + id + '"]');
@@ -640,10 +709,33 @@ fn document(title: string, page: Html): string {
     return "${head}${page.skeleton}\n<script src=\"/live.js\"></script></body></html>\n"
 }
 
-// One websocket session: a `view()` over the page's hole computeds, the full snapshot, then a loop —
-// each client event looks up the element's inline handler in the page's `handlers` table, runs it
-// (with the event payload), and pushes the minimal diff of the holes that changed.
-async fn session(sock: Socket, render_page: () -> Html): bool {
+// How often an idle session wakes to publish state that changed with no client event behind it.
+// Short enough to feel immediate, long enough that an idle page costs a timer and a diff check.
+// `handle_every` takes it explicitly for a page that wants a different cadence.
+pub fn poll_ms(): int {
+    return 500
+}
+
+// One websocket session: a `view()` over the page's hole computeds, the full snapshot, then a loop.
+// Two things wake it, and both end at the same push:
+//
+//   * a **client event** — look the element's inline handler up in the page's `handlers` table and
+//     run it with the event payload;
+//   * an **idle tick** — no client event, so run `on_tick` (where an app pulls whatever it syncs
+//     from outside the page) and diff anyway.
+//
+// The tick is what makes the page reactive to anything the *browser* did not cause. A session
+// blocked in a plain `recv` is deaf to its own server: another user's click, a peer's message
+// arriving over p2p, a finished job — all of them changed the reactive graph, and none of them
+// could reach the page until this browser happened to click something. `recv_timeout` is what a
+// tick needs; `race(recv, timer)` cannot do it, because cancelling the losing recv drops messages
+// the client did send.
+async fn session(
+    sock: Socket,
+    render_page: () -> Html,
+    every_ms: int,
+    on_tick: () -> void,
+): bool {
     page = render_page()
     v = view()
     mut i = 0
@@ -657,20 +749,26 @@ async fn session(sock: Socket, render_page: () -> Html): bool {
     sock.send(v.snapshot())
     mut going = true
     while going {
-        msg = sock.recv().await
-        if msg == none {
+        msg = sock.recv_timeout(every_ms).await
+        // `none` is either "nothing arrived this tick" or "the peer is gone" — `closed()` decides.
+        idle = msg == none && !sock.closed()
+        if msg == none && !idle {
             going = false
         } else {
-            evt = json.parse(msg ?? "{}")
-            kind = evt["type"]
-            if kind == "event" {
-                raw_name = evt["name"]
-                raw_value = evt["value"]
-                name = "${raw_name}"
-                value = "${raw_value}"
-                if handlers.has(name) {
-                    handler = handlers.get_or(name, fn(_: string) {})
-                    handler(value)
+            if idle {
+                on_tick()
+            } else {
+                evt = json.parse(msg ?? "{}")
+                kind = evt["type"]
+                if kind == "event" {
+                    raw_name = evt["name"]
+                    raw_value = evt["value"]
+                    name = "${raw_name}"
+                    value = "${raw_value}"
+                    if handlers.has(name) {
+                        handler = handlers.get_or(name, fn(_: string) {})
+                        handler(value)
+                    }
                 }
             }
             // Structural reconcile first — a keyed list may have gained, lost, or reordered rows;
@@ -701,8 +799,33 @@ pub fn handle(
     title: string,
     render_page: () -> Html,
 ): Response {
+    return handle_every(req, title, render_page, poll_ms(), fn() {})
+}
+
+// `handle` with the session's idle tick under your control: `every_ms` between wakes, and `on_tick`
+// run on each one, before the diff.
+//
+// The tick exists because a session cannot see its own server otherwise. `handle` alone already
+// publishes state that changed with no client event behind it — another user's click reaches this
+// page within `poll_ms()`. `on_tick` is for state that has to be *pulled* rather than merely
+// observed: `para/p2p`'s `synced_signal.sync()` is the case this was written for, where a peer's
+// message is sitting in the transport and something has to drain it into the reactive graph.
+//
+//     fn fetch(req: Request): Response {
+//         return handle_every(req, "chat", page, 500, fn() => log.sync())
+//     }
+//
+// Pass a larger `every_ms` for a page whose off-page state changes slowly; the cost of a tick is a
+// timer wake plus a diff over the page's holes, and an unchanged page sends nothing.
+pub fn handle_every(
+    req: Request,
+    title: string,
+    render_page: () -> Html,
+    every_ms: int,
+    on_tick: () -> void,
+): Response {
     if req.path() == "/ws" {
-        return server.websocket(fn(sock) => session(sock, render_page))
+        return server.websocket(fn(sock) => session(sock, render_page, every_ms, on_tick))
     }
     if req.path() == "/live.js" {
         return server.response(200, live_js(), {"content-type": "application/javascript"})
