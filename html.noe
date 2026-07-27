@@ -79,10 +79,18 @@ pub fn on_input(handler: (string) -> void): Binding {
     return Binding { event: DomEvent.Input, run: handler }
 }
 
-// Bind a form **submit** — the handler receives the URL-encoded form body (`a=1&b=2`). The client
-// prevents the default navigation so the page stays live.
-pub fn on_submit(handler: (string) -> void): Binding {
-    return Binding { event: DomEvent.Submit, run: handler }
+// Bind a form **submit** — the handler receives the form's **decoded fields**, keyed by input name.
+// The client prevents the default navigation so the page stays live.
+//
+// The wire carries `application/x-www-form-urlencoded` (`title=buy+milk&note=caf%C3%A9`), which is
+// what the dispatch table's `(string) -> void` delivers. Handing that raw to the handler leaked the
+// wire format into every app and made each one re-implement percent-decoding — so this wraps the
+// user's handler the way `on_click` does and parses once, through `std.http.server`'s codec.
+pub fn on_submit(handler: (Map<string, string>) -> void): Binding {
+    return Binding {
+        event: DomEvent.Submit,
+        run: fn(body: string) => handler(server.parse_form(body)),
+    }
 }
 
 // Minimal HTML-text escaping for a *scalar* hole's rendered value (XSS-safe by default).
