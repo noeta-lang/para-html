@@ -93,6 +93,35 @@ pub fn on_submit(handler: (Map<string, string>) -> void): Binding {
     }
 }
 
+// A stylesheet built by the `@css` tier: the rendered CSS text.
+pub struct Css {
+    text: string
+}
+
+// The `@css` expression tier handler — the sibling of `@html`. `@css { .todo { color: ${c} } }`
+// evaluates to a `Css` value, so a page's styles are checked, highlighted, and interpolatable
+// rather than one long string literal returned from a helper.
+//
+// A hole renders as its `Display` text with `<` removed. CSS has no HTML escaping, but the
+// stylesheet is emitted inside a `<style>` element, and the ONE thing that must not be
+// expressible there is a closing tag — `</style>` would end the element and let the rest of the
+// value be parsed as markup. Dropping `<` closes that without mangling any legal CSS, which
+// never needs the character.
+@tier(css, text: "css", expr: Css)
+pub fn css(statics: List<string>, holes: List<() -> dyn>): Css {
+    mut text = ""
+    mut i = 0
+    for s in statics {
+        text = text ~ s
+        if i < holes.len() {
+            h = holes[i]
+            text = text ~ "${h()}".replace("<", "")
+            i = i + 1
+        }
+    }
+    return Css { text: text }
+}
+
 // Minimal HTML-text escaping for a *scalar* hole's rendered value (XSS-safe by default).
 fn escape(s: string): string {
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -712,8 +741,12 @@ fn live_js(): string {
 }
 
 // Wrap a rendered template in a full HTML document with the bundled client shim.
-fn document(title: string, page: Html): string {
-    head = "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>${title}</title></head><body>\n"
+fn document(title: string, page: Html, styles: ?Css): string {
+    style_tag = match styles {
+        some(c) => "<style>${c.text}</style>",
+        none => "",
+    }
+    head = "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>${title}</title>${style_tag}</head><body>\n"
     return "${head}${page.skeleton}\n<script src=\"/live.js\"></script></body></html>\n"
 }
 
@@ -810,6 +843,20 @@ pub fn handle(
     return handle_every(req, title, render_page, poll_ms(), fn() {})
 }
 
+// `handle` with a stylesheet: the `@css` value is emitted into the document `<head>`, so a page
+// carries its own styles without an asset route. This lives here rather than in aether because
+// `handle` owns the page's routes (`/`, `/ws`, `/live.js`) and never reaches a router — a
+// LiveView page has to be self-contained. Mounting a directory of assets (images, fonts) is the
+// framework's job instead: `app.serve_files(dir)`.
+pub fn handle_styled(
+    req: Request,
+    title: string,
+    render_page: () -> Html,
+    styles: Css,
+): Response {
+    return handle_all(req, title, render_page, poll_ms(), fn() {}, some(styles))
+}
+
 // `handle` with the session's idle tick under your control: `every_ms` between wakes, and `on_tick`
 // run on each one, before the diff.
 //
@@ -832,11 +879,23 @@ pub fn handle_every(
     every_ms: int,
     on_tick: () -> void,
 ): Response {
+    return handle_all(req, title, render_page, every_ms, on_tick, none)
+}
+
+// The one implementation the three entry points delegate to.
+fn handle_all(
+    req: Request,
+    title: string,
+    render_page: () -> Html,
+    every_ms: int,
+    on_tick: () -> void,
+    styles: ?Css,
+): Response {
     if req.path() == "/ws" {
         return server.websocket(fn(sock) => session(sock, render_page, every_ms, on_tick))
     }
     if req.path() == "/live.js" {
         return server.response(200, live_js(), {"content-type": "application/javascript"})
     }
-    return server.response(200, document(title, render_page()), {"content-type": "text/html"})
+    return server.response(200, document(title, render_page(), styles), {"content-type": "text/html"})
 }

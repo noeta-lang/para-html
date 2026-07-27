@@ -1,0 +1,27 @@
+// `@css` is the sibling of `@html`: a page's styles are a checked, highlighted, interpolatable
+// value rather than one long string literal returned from a helper. `handle_styled` emits it into
+// the document head, so a LiveView page stays self-contained — it owns `/`, `/ws` and `/live.js`
+// and never reaches a router.
+//
+// expect: stdout "sheet:  .count { color: rebeccapurple; font-size: 14px } "
+// expect: stdout "injection:  .x { content: \"/style>oops\" } "
+// expect: exit 0
+use para.html.{render, css, Html, Css, handle_styled}
+use std.reactive.signal
+
+accent = signal("rebeccapurple")
+size = signal(14)
+
+fn sheet() use (accent, size): Css {
+    return @css { .count { color: ${accent.get()}; font-size: ${size.get()}px } }
+}
+
+echo "sheet: ${sheet().text}"
+
+// A hole cannot close the `<style>` element it is emitted inside: `<` is dropped, so a value
+// carrying `</style>` cannot end the element and have the rest parsed as markup.
+fn hostile() : Css {
+    return @css { .x { content: "${"</style>oops"}" } }
+}
+
+echo "injection: ${hostile().text}"
