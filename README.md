@@ -180,8 +180,10 @@ The session renders the page, builds a `view()` over the per-hole computeds, and
 
 On the client, the marker attribute alone decides how a value lands: a **text** hole (`data-live`) patches via `textContent` (escaped), a **markup** hole or keyed row (`data-live-html`) via `innerHTML` — so a reactive list of rows updates in place.
 
+A session also wakes on an **idle tick** (`poll_ms()`, 500ms) and diffs anyway, so a change no client event caused still reaches the page — another user's click, a finished job. `handle_every(req, title, page, every_ms, on_tick)` runs your own pull on each wake, for state that has to be *drained* rather than merely observed (a Postgres `NOTIFY` queue via `LiveRepository.pump()`, a p2p log via `sync()`).
+
 > [!NOTE]
-> Signals are per-isolate, so a LiveView app runs **single-worker** in v1 — every session of a page shares the same server-side signal state within one worker.
+> Signal state lives in the worker isolate that handled the connection, so under `noeta serve --parallel N` it is not shared across the fleet. An app whose source of truth is a **database** serves fine on all cores (each worker drains its own notifications); an app whose source of truth is an **in-memory signal** wants a single worker.
 
 ## Testing without a browser
 

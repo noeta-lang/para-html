@@ -123,9 +123,22 @@ The bundled client turns a `data-live-click="name"` into an event; the app's `on
 
 A hole in **attribute position** (`class="${…}"`, `title="${…}"`) is detected from the preceding text and **inlined** (escaped, including the quote) rather than wrapped in a `<span>`. Its value re-renders with the enclosing region (a row), not on its own.
 
-## Current limitations (v1)
+## What reaches the page, and when
 
-- **Single-worker**: signals are per-isolate, so a LiveView app runs single-worker (`--parallel` documents this).
+A session is **not** blocked waiting for the browser. It wakes on a client event *or* on an idle tick (`poll_ms()`, 500ms), and both ends at the same reconcile-and-diff — so a change with no client event behind it still reaches the page within a tick. Another user's click on a shared signal is the plain case, and `handle` already covers it.
+
+What the tick cannot do on its own is **pull**. State that has to be drained from somewhere — a Postgres `NOTIFY` queue, a p2p transport — needs a call on each wake, which is what `handle_every` takes:
+
+```noeta
+// every 500ms: drain the database's change notifications into the reactive graph, then diff
+return handle_every(req, "Todos", page, 500, refresh)
+```
+
+With that, a write from *any* connection — psql, a background job, a second worker — reaches every open page within the tick. With plain `handle` the tick runs a no-op, so the queue is only drained when a handler happens to drain it, and an external write waits for the next click.
+
+## Current limitations
+
+- **Signal state is per worker isolate.** Under `noeta serve --parallel N` each worker runs the program in its own isolate, so a value that lives *in a signal* is not shared across the fleet — two browsers on different workers see different counters. This is a limit on where the **source of truth** lives, not on LiveView: an app backed by a database is fine on all cores, because each worker opens its own connection and drains its own notifications (`para/db`'s `LiveRepository` over Postgres `LISTEN`/`NOTIFY` is exactly this). An app whose truth is an in-memory signal wants a single worker until session state is shared.
 
 ## See also
 
