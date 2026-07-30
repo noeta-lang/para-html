@@ -26,10 +26,15 @@ use std.json
 // closure here under an auto id (`eN`) and emits a matching `data-live-*` marker, so a client event
 // routes straight to the closure at the element — no magic string, no central `on_event` match.
 pub struct Html {
-    skeleton: string
+    // `skeleton` and `handlers` are the page's inspectable surface: the served markup and the event
+    // table a client event routes through. They are `pub` so a test can drive the whole model with no
+    // browser and no socket — assert the skeleton escaped a value, look a closure up by its id and
+    // call it — exactly the way the websocket session does. The examples under `examples/liveview-*`
+    // read them the same way.
+    pub skeleton: string
     holes: List<dyn>
     ids: List<string>
-    handlers: Map<string, (string) -> void>
+    pub handlers: Map<string, (string) -> void>
     // Keyed-list regions on this page (one per `${keyed(…)}` hole). The websocket session reconciles
     // each after every event: it diffs the region's key sequence and pushes minimal structural ops
     // (insert / remove / move) so add / prepend / remove / reorder patch in place instead of
