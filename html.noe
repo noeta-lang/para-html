@@ -11,8 +11,6 @@
 // A consumer keys this package `para` in `[dependencies]`, imports `render` (which brings the
 // `@html` tier declaration into scope) and `handle`, and writes ordinary HTML with `${…}` holes
 // over signals. See `examples/liveview-counter/`.
-namespace para.html
-
 use std.reactive.{signal, computed, view, Signal, Computed, View}
 use std.http.server
 use std.http.{Request, Response, Socket}
