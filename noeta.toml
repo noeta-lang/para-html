@@ -6,3 +6,8 @@ toolchain = ">=0.2"
 license = "MIT OR Apache-2.0"
 description = "HTML rendering and LiveView — server-driven UI over WebSockets with structural diffs."
 keywords = ["html", "liveview", "web", "templating"]
+# This package ships DEV-ONLY, trust-free native tier-body formatters (the `"html"`/`"css"` reflow for
+# `noeta fmt`), in the entry crate under `native/`. Declared as `dev-native` (NOT `native`): the code
+# is compiled into the dev toolchain only, contributes nothing at run time, and therefore needs NO
+# `[trust] native` authorization from a consumer.
+dev-native = "native"

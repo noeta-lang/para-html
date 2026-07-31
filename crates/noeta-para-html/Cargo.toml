@@ -1,0 +1,43 @@
+[package]
+name = "noeta-para-html"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/noeta-lang/para-html"
+rust-version = "1.95"
+
+[dependencies]
+# The extension ABI, pinned to the toolchain release this package version is built against.
+# The composed toolchain rewrites this git crate to the consumer's exact toolchain source via a
+# `[patch]` (see `compose.rs::toolchain_patch_section`), so the `dyn Extension` vtables unify.
+noeta-ext-abi = { git = "https://github.com/noeta-lang/noeta", tag = "v0.2.3" }
+# The pure-Rust CSS formatter behind the `"css"` body formatter. Optional and behind the `fmt`
+# feature: a default build ships an EMPTY extension (no malva, `body_formatters()` returns `&[]`),
+# so a prod/consumer build links no CSS formatter. Only the dev toolchain builds `--features fmt`.
+malva = { version = "0.16.0", optional = true }
+
+[features]
+# Default = empty extension: malva-free, both extensions' `body_formatters()` return `&[]`.
+default = []
+# The tier-body formatters (HTML reflow + CSS via malva). Enabled ONLY for the dev toolchain,
+# never prod. Gating the whole heavy formatter path (and malva) here keeps the default footprint nil.
+fmt = ["dep:malva"]
+
+# Dev-only: for STANDALONE `cargo test` of this crate against an unreleased toolchain, redirect the
+# `noeta-ext-abi` git pin above to the local monorepo checkout so the `dyn Extension` type matches
+# the toolchain the width-fix tests link. Cargo applies `[patch]` only at a WORKSPACE ROOT, so this
+# takes effect when this crate is built standalone (its own `[workspace]` below) and is IGNORED when
+# the composed toolchain builds `native/` as a path dependency (that build's generated root supplies
+# its own patch). The shipped dependency pin (git tag) is unchanged.
+[patch."https://github.com/noeta-lang/noeta"]
+noeta-ext-abi = { path = "/home/niklas/Code/lang/crates/noeta-ext-abi" }
+
+# Inlined from the monorepo's [workspace.lints] (this crate is standalone).
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace]
