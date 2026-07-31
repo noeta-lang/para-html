@@ -1,0 +1,28 @@
+# The native entry crate for the `para/html` package. Standalone (its own empty `[workspace]`) so the
+# composed toolchain can build it as a path dependency without adopting this repo's layout, exactly
+# like the generated shim. It re-exports the `noeta-para-html` crate's extension slice under the fixed
+# `NOETA_EXTENSIONS` convention.
+#
+# This is a DEV-ONLY, trust-free capability: the manifest declares it under `dev-native = "native"`,
+# NOT `native`, so a consumer never needs `[trust] native`. The formatters are compiled into the dev
+# toolchain only, never a prod build.
+[package]
+name = "para-html-native"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+# The impl crate lives in this repo (crates/noeta-para-html). Default-features off so the entry
+# crate itself is the EMPTY extension; the dev toolchain forwards `--features fmt` to pull in the
+# formatter code (malva) via the `fmt` feature below.
+noeta-para-html = { path = "../crates/noeta-para-html", default-features = false }
+
+[features]
+# The tier-body formatters, forwarded to the impl crate. Not default: the dev toolchain enables it to
+# get HTML/CSS reflow under `noeta fmt`; a plain build links no malva and registers empty extensions.
+fmt = ["noeta-para-html/fmt"]
+
+[workspace]
