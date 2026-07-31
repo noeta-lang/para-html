@@ -23,14 +23,10 @@ default = []
 # never prod. Gating the whole heavy formatter path (and malva) here keeps the default footprint nil.
 fmt = ["dep:malva"]
 
-# Dev-only: for STANDALONE `cargo test` of this crate against an unreleased toolchain, redirect the
-# `noeta-ext-abi` git pin above to the local monorepo checkout so the `dyn Extension` type matches
-# the toolchain the width-fix tests link. Cargo applies `[patch]` only at a WORKSPACE ROOT, so this
-# takes effect when this crate is built standalone (its own `[workspace]` below) and is IGNORED when
-# the composed toolchain builds `native/` as a path dependency (that build's generated root supplies
-# its own patch). The shipped dependency pin (git tag) is unchanged.
-[patch."https://github.com/noeta-lang/noeta"]
-noeta-ext-abi = { path = "/home/niklas/Code/lang/crates/noeta-ext-abi" }
+# To run this crate's tests standalone against an unreleased toolchain, add a local
+# `[patch."https://github.com/noeta-lang/noeta"] noeta-ext-abi = { path = "…/lang/crates/noeta-ext-abi" }`
+# in your own checkout (Cargo honors `[patch]` only at a workspace root; the composed toolchain
+# supplies its own). Not committed — it would hardcode a machine-specific path.
 
 # Inlined from the monorepo's [workspace.lints] (this crate is standalone).
 [lints.rust]
