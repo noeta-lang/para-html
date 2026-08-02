@@ -15,6 +15,7 @@ use std.reactive.{signal, computed, view, Signal, Computed, View}
 use std.http.server
 use std.http.{Request, Response, Socket}
 use std.json
+use std.datetime
 
 // A compiled `@html` template: the static HTML skeleton (holes rendered as `<span data-live="id">`
 // markers, filled with their initial values for a no-flash first paint), the per-hole `computed`s
@@ -809,6 +810,84 @@ fn document(title: string, page: Html, styles: ?Css): string {
     return "${head}${page.skeleton}\n<script src=\"/live.js\"></script></body></html>\n"
 }
 
+// One wake of a live session: a client frame, or an idle tick. The unit an interceptor layers over —
+// para/html's own vocabulary for "something happened", carrying nothing about who the client is.
+//
+// `origin` is the request that opened the socket, carried so a layer can recover whatever the upgrade
+// carried (a cookie, a header). This package never reads it; it only hands it over.
+pub struct Wake {
+    // The handler id the client named and the payload it sent. Both empty on an idle tick.
+    name: string
+    value: string
+    // True when no client frame arrived — the session woke on its own timer. A tick runs `on_tick`
+    // rather than a handler, and is exempt from the client-facing limits: there is no client behind
+    // it to rate-limit, and no payload to bound.
+    tick: bool
+    origin: Request
+}
+
+// Parse one wake off the socket. A malformed or non-`event` frame yields a wake bound to no handler,
+// which `dispatch` then refuses by id — so a garbage frame costs a parse and nothing else.
+fn wake_of(msg: ?string, idle: bool, origin: Request): Wake {
+    if idle {
+        return Wake { name: "", value: "", tick: true, origin: origin }
+    }
+    evt = json.parse(msg ?? "{}")
+    if "${evt["type"]}" != "event" {
+        return Wake { name: "", value: "", tick: false, origin: origin }
+    }
+    return Wake { name: "${evt["name"]}", value: "${evt["value"]}", tick: false, origin: origin }
+}
+
+// --- The unconditional limits. -----------------------------------------------------------------
+//
+// These are enforced in `session` itself, for every page, with no way to opt out and no interceptor
+// involved. That placement is the deliberate part. The obvious alternative is to ship them as onion
+// layers in the companion `para/aether_html` package — but a layer only exists on the *mounted* path,
+// which would leave the standalone one-file page (`handle(req, title, page)`, the simplest and most
+// common way a LiveView app gets written) as the one with no protections at all. A limit no app
+// should have to ask for belongs where every app already is.
+//
+// The division the arc settles on: para/html carries the limits, the onion carries app policy.
+
+// The largest event payload a client may send, in characters. Generous for anything this wire is
+// for — a click carries nothing, an input carries a field, a submit carries a form — and small
+// enough that a hostile frame cannot make the server hold an arbitrary string. A frame over the cap
+// is dropped whole: it never reaches a handler, an interceptor, or the reactive graph. File uploads
+// do not belong on this wire; they belong on an ordinary HTTP route.
+pub fn max_payload_chars(): int {
+    return 262144
+}
+
+// The most client frames a session will admit per second. Well above any human input rate — fast
+// typing on an `on_input` is ~15/s and a dragged range input ~60/s — so it bounds a flood by an order
+// of magnitude without ever touching a real interaction. Frames over the cap are dropped, not queued:
+// queueing a flood is how a rate limit becomes the memory exhaustion it was meant to prevent.
+//
+// Measured against `datetime.now()`, the real wall clock. `time.monotonic()` cannot serve here — it
+// is a *logical* counter that advances one tick per call and only tracks real time across an explicit
+// sleep, so a rate computed from it would be meaningless.
+pub fn max_frames_per_second(): int {
+    return 120
+}
+
+// Whether a wake clears the unconditional limits. `in_window` is how many client frames have been
+// counted in the current one-second window, this one included.
+//
+// A tick always clears: it has no client behind it to rate-limit and no payload to bound. Everything
+// else is decided here rather than inline in `session` for the same reason `dispatch` is a function —
+// the loop needs a socket to run, so a decision left inside it could not be tested without one, and
+// an untestable limit is a limit that quietly stops holding.
+pub fn within_limits(tick: bool, payload: string, in_window: int): bool {
+    if tick {
+        return true
+    }
+    if payload.len() > max_payload_chars() {
+        return false
+    }
+    return in_window <= max_frames_per_second()
+}
+
 // How often an idle session wakes to publish state that changed with no client event behind it.
 // Short enough to feel immediate, long enough that an idle page costs a timer and a diff check.
 // `handle_every` takes it explicitly for a page that wants a different cadence.
@@ -835,6 +914,8 @@ async fn session(
     render_page: () -> Html,
     every_ms: int,
     on_tick: () -> void,
+    origin: Request,
+    intercept: ?(Wake, () -> void) -> void,
 ): bool {
     page = render_page()
     v = view()
@@ -843,10 +924,16 @@ async fn session(
         v.expose(page.ids[i], c)
         i = i + 1
     }
-    // The dispatch table is mutable across the session: a keyed row that joins registers its inline
-    // handlers, a row that leaves drops them (see `reconcile_region`).
-    mut handlers = page.handlers
+    // The dispatch table changes across the session — a keyed row that joins registers its inline
+    // handlers, a row that leaves drops them (see `reconcile_region`) — and the wake thunk below
+    // both reads and replaces it. A `signal` rather than a `mut` local because a closure captures a
+    // binding, not a cell: the same reason `KeyedRegion.prev` is a signal.
+    table = signal(page.handlers)
     sock.send(v.snapshot())
+    // Frame-rate accounting for `within_limits`, carried across iterations: the current one-second
+    // window's start (real ms) and how many frames have been admitted inside it.
+    mut window_start = datetime.now().unix_ms()
+    mut in_window = 0
     mut going = true
     while going {
         msg = sock.recv_timeout(every_ms).await
@@ -855,36 +942,51 @@ async fn session(
         if msg == none && !idle {
             going = false
         } else {
-            if idle {
-                on_tick()
-            } else {
-                evt = json.parse(msg ?? "{}")
-                kind = evt["type"]
-                if kind == "event" {
-                    raw_name = evt["name"]
-                    raw_value = evt["value"]
-                    name = "${raw_name}"
-                    value = "${raw_value}"
-                    // Guard-then-run, checked HERE — on the wake the event arrived on, not at the
-                    // render that emitted the marker (see `Binding.guard`). The verdict is dropped:
-                    // the reconcile and diff below run either way, so a refused event simply leaves
-                    // the page as it was.
-                    dispatch(handlers, name, value)
-                }
+            w = wake_of(msg, idle, origin)
+            // The unconditional limits, checked before ANY app code runs and before an interceptor
+            // is consulted — see `max_payload_chars`/`max_frames_per_second` for why they are not
+            // layers. A tick is exempt: it has no client behind it to rate-limit or oversize.
+            now_ms = datetime.now().unix_ms()
+            if now_ms - window_start >= 1000 {
+                window_start = now_ms
+                in_window = 0
             }
-            // Structural reconcile first — a keyed list may have gained, lost, or reordered rows;
-            // push its minimal insert/remove/move ops, and unexpose/expose the affected row bindings
-            // so the content diff that follows neither pushes a gone row nor re-pushes a fresh one.
-            for reg in page.regions {
-                res = reconcile_region(reg, v, handlers)
-                handlers = res.handlers
-                if res.frame != "" {
-                    sock.send(res.frame)
+            in_window = in_window + 1
+            if within_limits(w.tick, w.value, in_window) {
+                // The rest of the wake, as a value: run the handler (or the tick), reconcile every
+                // keyed region, push the diff. Handed to an interceptor as its `next` so a layer can
+                // wrap the whole wake — measure it, or decline to run it — exactly as aether's
+                // `Next.run` is the rest of an HTTP pipeline. See `docs/FrameOnion.md`.
+                proceed = fn() {
+                    if w.tick {
+                        on_tick()
+                    } else {
+                        // Guard-then-run, checked HERE — on the wake the event arrived on, not at
+                        // the render that emitted the marker (see `Binding.guard`). The verdict is
+                        // dropped: the reconcile and diff below run either way, so a refused event
+                        // simply leaves the page as it was.
+                        dispatch(table.get(), w.name, w.value)
+                    }
+                    // Structural reconcile first — a keyed list may have gained, lost, or reordered
+                    // rows; push its minimal insert/remove/move ops, and unexpose/expose the affected
+                    // row bindings so the content diff that follows neither pushes a gone row nor
+                    // re-pushes a fresh one.
+                    for reg in page.regions {
+                        res = reconcile_region(reg, v, table.get())
+                        table.set(res.handlers)
+                        if res.frame != "" {
+                            sock.send(res.frame)
+                        }
+                    }
+                    patch = v.diff() ?? ""
+                    if patch != "" {
+                        sock.send(patch)
+                    }
                 }
-            }
-            patch = v.diff() ?? ""
-            if patch != "" {
-                sock.send(patch)
+                match intercept {
+                    none => proceed(),
+                    some(layer) => layer(w, proceed),
+                }
             }
         }
     }
@@ -914,7 +1016,7 @@ pub fn handle_styled(
     render_page: () -> Html,
     styles: Css,
 ): Response {
-    return handle_all(req, title, render_page, poll_ms(), fn() {}, some(styles))
+    return handle_all(req, title, render_page, poll_ms(), fn() {}, some(styles), none)
 }
 
 // `handle` with the session's idle tick under your control: `every_ms` between wakes, and `on_tick`
@@ -939,20 +1041,31 @@ pub fn handle_every(
     every_ms: int,
     on_tick: () -> void,
 ): Response {
-    return handle_all(req, title, render_page, every_ms, on_tick, none)
+    return handle_all(req, title, render_page, every_ms, on_tick, none, none)
 }
 
-// The one implementation the three entry points delegate to.
-fn handle_all(
+// The one implementation the sugar entry points delegate to, and the full-control door in its own
+// right — `pub` because a host framework needs every knob at once.
+//
+// `intercept` is the seam the companion `para/aether_html` package is built on: a layer receives each
+// `Wake` and the rest of the work as a thunk, so it may measure the wake, run it, or decline to run
+// it — the same shape as aether's `Next.run`, one level down. It is deliberately phrased in nothing
+// but para/html's own vocabulary: this package never learns what a user or a permission is, and an
+// app that passes `none` (which every sugar entry point does) behaves exactly as it always has.
+//
+// The unconditional limits in `session` are NOT part of this seam and cannot be layered away — see
+// `max_payload_chars`. An interceptor only ever sees wakes that already cleared them.
+pub fn handle_all(
     req: Request,
     title: string,
     render_page: () -> Html,
     every_ms: int,
     on_tick: () -> void,
     styles: ?Css,
+    intercept: ?(Wake, () -> void) -> void,
 ): Response {
     if req.path() == "/ws" {
-        return server.websocket(fn(sock) => session(sock, render_page, every_ms, on_tick))
+        return server.websocket(fn(sock) => session(sock, render_page, every_ms, on_tick, req, intercept))
     }
     if req.path() == "/live.js" {
         return server.response(200, live_js(), {"content-type": "application/javascript"})

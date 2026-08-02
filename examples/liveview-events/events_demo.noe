@@ -114,6 +114,24 @@ fn guards(): void {
     echo hits.get()
     // An id that was never registered is refused the same silent way as a denied one.
     echo html.dispatch(g.handlers, "e9", "")
+    limits()
+}
+
+// The limits `session` applies to every page unconditionally — no interceptor, no opt-out. Checked
+// here through the same function the session loop calls, so the browserless rehearsal covers them.
+fn limits(): void {
+    // An ordinary event clears both limits.
+    echo html.within_limits(false, "buy milk", 1)
+    // A payload over the cap is refused whole — it never reaches a handler or the reactive graph.
+    big = "x".repeat(html.max_payload_chars() + 1)
+    echo html.within_limits(false, big, 1)
+    // Exactly at the cap is still fine: the limit is a ceiling, not a fence one short of it.
+    echo html.within_limits(false, "x".repeat(html.max_payload_chars()), 1)
+    // The rate cap admits its budget and refuses the frame past it.
+    echo html.within_limits(false, "", html.max_frames_per_second())
+    echo html.within_limits(false, "", html.max_frames_per_second() + 1)
+    // A tick is exempt from both: no client behind it to rate-limit, no payload to bound.
+    echo html.within_limits(true, big, html.max_frames_per_second() * 100)
 }
 
 main()
