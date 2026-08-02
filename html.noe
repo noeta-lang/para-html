@@ -815,28 +815,43 @@ fn document(title: string, page: Html, styles: ?Css): string {
 //
 // `origin` is the request that opened the socket, carried so a layer can recover whatever the upgrade
 // carried (a cookie, a header). This package never reads it; it only hands it over.
+//
+// Every field is `pub`: a wake is the value a *host framework* layers over, and a layer that cannot
+// read what it is layering over is useless. Contrast `Binding`, whose fields stay private — a binding
+// is this package's own bookkeeping, and only `dispatch` has business running one.
 pub struct Wake {
     // The handler id the client named and the payload it sent. Both empty on an idle tick.
-    name: string
-    value: string
+    pub name: string
+    pub value: string
     // True when no client frame arrived — the session woke on its own timer. A tick runs `on_tick`
     // rather than a handler, and is exempt from the client-facing limits: there is no client behind
     // it to rate-limit, and no payload to bound.
-    tick: bool
-    origin: Request
+    pub tick: bool
+    // The request that opened the socket, or `none` on the browserless path — the same shape and the
+    // same reason as aether's `request_arg(req: ?Request)`: a live request exists only on the server
+    // path, and forcing one would make the onion untestable without a real socket. A layer that needs
+    // the request must decide what absence means for it, and should fail closed.
+    pub origin: ?Request
+}
+
+// Build a wake by hand. The socket path builds its own with `wake_of`; this is the door a *host
+// framework* tests its layers through, without a browser or a socket — the same reason `dispatch` and
+// `within_limits` are `pub`. A wake built here carries no origin.
+pub fn wake(name: string, value: string, tick: bool): Wake {
+    return Wake { name: name, value: value, tick: tick, origin: none }
 }
 
 // Parse one wake off the socket. A malformed or non-`event` frame yields a wake bound to no handler,
 // which `dispatch` then refuses by id — so a garbage frame costs a parse and nothing else.
 fn wake_of(msg: ?string, idle: bool, origin: Request): Wake {
     if idle {
-        return Wake { name: "", value: "", tick: true, origin: origin }
+        return Wake { name: "", value: "", tick: true, origin: some(origin) }
     }
     evt = json.parse(msg ?? "{}")
     if "${evt["type"]}" != "event" {
-        return Wake { name: "", value: "", tick: false, origin: origin }
+        return Wake { name: "", value: "", tick: false, origin: some(origin) }
     }
-    return Wake { name: "${evt["name"]}", value: "${evt["value"]}", tick: false, origin: origin }
+    return Wake { name: "${evt["name"]}", value: "${evt["value"]}", tick: false, origin: some(origin) }
 }
 
 // --- The unconditional limits. -----------------------------------------------------------------
