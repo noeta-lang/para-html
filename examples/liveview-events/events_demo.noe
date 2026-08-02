@@ -18,6 +18,7 @@
 // expect: stdout "false"
 // expect: stdout "buy milk"
 // expect: exit 0
+use para.html
 use para.html.{render, Html, keyed, on_click, on_input, on_submit}
 use std.reactive.signal
 
@@ -50,14 +51,17 @@ fn page() use (count, items, name, submitted): Html {
     return @html {
         <button ${on_click(fn() => count.update(fn(n) => n + 1))}>+1</button>
         <button ${on_click(fn() => count.set(0))}>reset</button> <input ${on_input(fn(v) => name.set(v))} value="${name.get()}" placeholder="name">
-        <form ${on_submit(fn(f) => submitted.set(f["title"]))}><input name="title"><button type="submit">add</button></form>
+        <form ${on_submit(fn(f) => submitted.set(f["title"]))}><input name="title">
+          <button type="submit">add</button>
+        </form>
         <ul>${keyed(items, fn(x) => "${x.id}", row)}</ul>
     }
 }
 
-// Simulate one client event: look up the element's inline handler by id, run it with the payload.
+// Simulate one client event through the package's own dispatch — the same function the websocket
+// session calls, guard check included, so this browserless rehearsal cannot drift from the server.
 fn fire(p: Html, id: string, value: string): void {
-    p.handlers.get_or(id, fn(_: string) {})(value)
+    html.dispatch(p.handlers, id, value)
 }
 
 fn main() use (count, items, name, submitted): void {
@@ -88,6 +92,28 @@ fn main() use (count, items, name, submitted): void {
     // body (`title=buy+milk`) never reaches user code, so no app re-implements percent-decoding.
     fire(p, "e4", "title=buy+milk&note=caf%C3%A9")
     echo submitted.get()
+    guards()
+}
+
+// Guards are checked at EVENT time, not at render time — the point being that whether an element was
+// rendered is decided once, at socket open, while the handler table stays reachable for the whole
+// session. So the same registered id runs or does not run purely on what the guard says *now*.
+fn guards(): void {
+    allowed = signal(false)
+    hits = signal(0)
+    g = @html { <button ${on_click(fn() => hits.update(fn(n) => n + 1)).only_if(fn() => allowed.get())}>danger</button> }
+    // The marker is emitted exactly as for an unguarded binding: a guard is invisible on the wire, so
+    // a client cannot tell a guarded element from an open one and probe accordingly.
+    echo g.skeleton.contains("data-live-click=\"e0\"")
+    // Refused: `dispatch` reports false and the handler never ran.
+    echo html.dispatch(g.handlers, "e0", "")
+    echo hits.get()
+    // Same id, same table, same page — only the guard's verdict changed.
+    allowed.set(true)
+    echo html.dispatch(g.handlers, "e0", "")
+    echo hits.get()
+    // An id that was never registered is refused the same silent way as a denied one.
+    echo html.dispatch(g.handlers, "e9", "")
 }
 
 main()
