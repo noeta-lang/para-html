@@ -185,6 +185,32 @@ A session also wakes on an **idle tick** (`poll_ms()`, 500ms) and diffs anyway, 
 > [!NOTE]
 > Signal state lives in the worker isolate that handled the connection, so under `noeta serve --parallel N` it is not shared across the fleet. An app whose source of truth is a **database** serves fine on all cores (each worker drains its own notifications); an app whose source of truth is an **in-memory signal** wants a single worker.
 
+## What crosses the wire, and what does not
+
+Worth being precise about, because the framing this model invites is often wrong.
+
+**No application state is ever serialized to the client.** This is not LiveWire's model, where a component's public properties ride in the DOM as a snapshot and round-trip on every request — the reason LiveWire needs `#[Locked]` and hidden properties. Here signals stay on the server and only *rendered output* moves:
+
+- **server → client:** a map of hole id → **rendered string**, plus keyed structural ops (`insert` / `remove` / `move`). The client shim does `textContent = value` or `innerHTML = value` and nothing else. First paint is the same values baked into the skeleton.
+- **client → server:** `{type, name, value}` — a handler **id** and a payload string. Empty for a click, the field value for an input, the urlencoded body for a submit.
+- **the closures** stay in the session's own table. The client names an id; it never ships code or state.
+
+So a `User` in scope never leaves the process. There is no property to hide, because no property is sent. Two consequences do deserve care:
+
+**A struct in a hole discloses every field.** `${user}` is not markup, so it renders as escaped text — via the value's `to_string` if it has one, and otherwise as `User {id: 1, email: "…", password_hash: "…"}`. Same for `${users}`. Give a type an `impl Display` and `${user}` is safe by construction, once, everywhere.
+
+**Every registered handler is reachable for the session's life.** The table is built from one `render_page()` at socket open, so an id survives the element being hidden, disabled, or scrolled away — and survives a permission being revoked. Rendering is not authorization; `.only_if(...)` is:
+
+```noeta
+<button ${on_click(fn() => todos.remove(t.id)).only_if(fn() => user.can_edit(t))}>delete</button>
+```
+
+The guard is re-checked on the wake the event arrives on, against current state. A refused event is dropped exactly as an unknown id is — silently, with no reply.
+
+**Two limits apply to every page, unconditionally.** A payload cap (`max_payload_chars`, 256k) and a frame-rate cap (`max_frames_per_second`, 120) are enforced in the session loop itself, with no way to opt out. They are deliberately not something a framework layers on: a limit that only existed for apps which adopted some other package would leave the plain one-file page — the most common way these get written — with no protections at all.
+
+For cross-cutting concerns that need more than this (per-frame identity, per-action rate budgets, tracing), `handle_all` takes an optional interceptor over each `Wake`; [para/aether_html](https://github.com/noeta-lang/para-aether-html) is the onion built on it.
+
 ## Testing without a browser
 
 An `Html` value is a plain, inspectable struct — the skeleton is a string and the dispatch table is a `Map` — so the whole event model exercises under `noeta run` / `noeta test` with no browser and no socket. Simulating a client event is exactly what the websocket session does: look up the closure by id, run it with the payload.
