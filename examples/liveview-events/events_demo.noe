@@ -196,4 +196,33 @@ main()
         huge = "x".repeat(html.max_payload_chars() + 1)
         assert(html.within_limits(true, huge, html.max_frames_per_second() * 100))
     }
+
+    // A standalone page owns every path — an unmatched URL still renders it, which is what makes a
+    // one-file app a whole site with no router.
+    fn a_root_page_owns_every_path(): void {
+        assert(html.serves("", "/"))
+        assert(html.serves("", "/ws"))
+        assert(html.serves("", "/live.js"))
+        assert(html.serves("", "/anything/at/all"), "the root page is its own catch-all")
+    }
+
+    // A mounted page owns exactly its three URLs. A mount that swallowed every unmatched path would
+    // silently become the app's 404 handler for every route registered after it.
+    fn a_mounted_page_owns_exactly_its_three_urls(): void {
+        assert(html.serves("/todos", "/todos"))
+        assert(html.serves("/todos", "/todos/"))
+        assert(html.serves("/todos", "/todos/ws"))
+        assert(html.serves("/todos", "/todos/live.js"))
+        assert(!html.serves("/todos", "/"), "a mount must not claim the root")
+        assert(!html.serves("/todos", "/ws"), "a mount must not claim the unprefixed socket")
+        assert(!html.serves("/todos", "/api/users"), "a mount must not claim a sibling route")
+    }
+
+    // Two mounts must not claim each other's URLs, or the first registered would shadow the second.
+    fn two_mounts_do_not_overlap(): void {
+        assert(!html.serves("/todos", "/chat/ws"))
+        assert(!html.serves("/chat", "/todos/ws"))
+        // A prefix that is a string-prefix of another is still disjoint: `/to` must not claim `/todos`.
+        assert(!html.serves("/to", "/todos"), "prefix matching must be segment-exact, not substring")
+    }
 }

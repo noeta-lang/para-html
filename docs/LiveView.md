@@ -127,14 +127,14 @@ A hole in **attribute position** (`class="${…}"`, `title="${…}"`) is detecte
 
 A session is **not** blocked waiting for the browser. It wakes on a client event *or* on an idle tick (`poll_ms()`, 500ms), and both ends at the same reconcile-and-diff — so a change with no client event behind it still reaches the page within a tick. Another user's click on a shared signal is the plain case, and `handle` already covers it.
 
-What the tick cannot do on its own is **pull**. State that has to be drained from somewhere — a Postgres `NOTIFY` queue, a p2p transport — needs a call on each wake, which is what `handle_every` takes:
+What the tick cannot do on its own is **pull**. State that has to be drained from somewhere — a Postgres `NOTIFY` queue, a p2p transport — needs a call on each wake, which is what `on_tick:` takes:
 
 ```noeta
 // every 500ms: drain the database's change notifications into the reactive graph, then diff
-return handle_every(req, "Todos", page, 500, refresh)
+return handle(req, "Todos", page, every_ms: 500, on_tick: refresh)
 ```
 
-With that, a write from *any* connection — psql, a background job, a second worker — reaches every open page within the tick. With plain `handle` the tick runs a no-op, so the queue is only drained when a handler happens to drain it, and an external write waits for the next click.
+With that, a write from *any* connection — psql, a background job, a second worker — reaches every open page within the tick. Without `on_tick:` the tick runs a no-op, so the queue is only drained when a handler happens to drain it, and an external write waits for the next click.
 
 ## What crosses the wire, and what does not
 
@@ -147,7 +147,11 @@ Two things still deserve care, and both are about what an author writes rather t
 - **A struct in a hole discloses every field.** `${user}` renders as escaped text — through the type's `to_string` if it has one, otherwise `User {id: 1, email: "…", password_hash: "…"}`. An `impl Display` fixes it per type, once.
 - **A registered handler is reachable for the whole session.** The table is built from one `render_page()` at socket open, so not rendering a button gates nothing — the client picks the id, and hidden, `disabled`, and since-revoked all stay reachable. Guard the binding instead, which is re-checked at event time: `on_click(del).only_if(fn() => user.can_edit(t))`.
 
-A payload cap and a frame-rate cap apply to every page unconditionally, in the session loop itself. Anything richer — per-frame identity, per-action budgets, tracing — hangs off `handle_all`'s optional interceptor, which is what [para/aether_html](https://github.com/noeta-lang/para-aether-html) builds its onion on.
+A payload cap and a frame-rate cap apply to every page unconditionally, in the session loop itself. Anything richer — per-frame identity, per-action budgets, tracing — hangs off `handle`'s `intercept:` argument, which is what [para/aether_html](https://github.com/noeta-lang/para-aether-html) builds its onion on.
+
+## Mounting beside other routes
+
+`handle(req, title, page, base: "/todos")` moves the page's three URLs under a prefix, so a LiveView page can live beside an app's other routes instead of owning the origin. A page at the root still answers every unmatched path — that is what makes a one-file app a whole site with no router — while a mounted page answers exactly `/todos`, `/todos/ws`, and `/todos/live.js`. `serves(base, path)` is that rule as a function; a host framework gates its mount with it rather than reimplementing it. [para/aether_html](https://github.com/noeta-lang/para-aether-html)'s `LiveMount` is the aether-side wiring.
 
 ## Current limitations
 
