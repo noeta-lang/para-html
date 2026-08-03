@@ -15,6 +15,7 @@ use std.reactive.{signal, computed, view, Signal, Computed, View}
 use std.http.server
 use std.http.{Request, Response, Socket}
 use std.json
+use std.datetime
 
 // A compiled `@html` template: the static HTML skeleton (holes rendered as `<span data-live="id">`
 // markers, filled with their initial values for a no-flash first paint), the per-hole `computed`s
@@ -23,18 +24,20 @@ use std.json
 // accepts `dyn` and this keeps the field a built-in.
 //
 // `handlers` is the template's inline event table: an `${on_click(fn() => …)}` hole registers its
-// closure here under an auto id (`eN`) and emits a matching `data-live-*` marker, so a client event
-// routes straight to the closure at the element — no magic string, no central `on_event` match.
+// `Binding` here under an auto id (`eN`) and emits a matching `data-live-*` marker, so a client event
+// routes straight to the binding at the element — no magic string, no central `on_event` match. The
+// table holds whole `Binding`s rather than bare closures so the session can consult each one's guard
+// before running it (see `Binding.guard`).
 pub struct Html {
     // `skeleton` and `handlers` are the page's inspectable surface: the served markup and the event
     // table a client event routes through. They are `pub` so a test can drive the whole model with no
-    // browser and no socket — assert the skeleton escaped a value, look a closure up by its id and
-    // call it — exactly the way the websocket session does. The examples under `examples/liveview-*`
+    // browser and no socket — assert the skeleton escaped a value, look a binding up by its id and
+    // `.run` it — exactly the way the websocket session does. The examples under `examples/liveview-*`
     // read them the same way.
     pub skeleton: string
     holes: List<dyn>
     ids: List<string>
-    pub handlers: Map<string, (string) -> void>
+    pub handlers: Map<string, Binding>
     // Keyed-list regions on this page (one per `${keyed(…)}` hole). The websocket session reconciles
     // each after every event: it diffs the region's key sequence and pushes minimal structural ops
     // (insert / remove / move) so add / prepend / remove / reorder patch in place instead of
@@ -52,12 +55,65 @@ pub enum DomEvent {
 }
 
 // A handler bound inline in a template (`<button ${on_click(fn() => …)}>`). The `@html` handler
-// registers `run` in the page's `handlers` table under an auto id and emits `event`'s marker; the
-// session loop looks the closure up by id when the client reports the event. `run` receives the
+// registers the whole binding in the page's `handlers` table under an auto id and emits `event`'s
+// marker; the session loop looks it up by id when the client reports the event. `run` receives the
 // event payload — empty for a click, the field value for an input, the URL-encoded body for a submit.
+//
+// `guard`, when present, is re-checked *at event time* — on the same wake as `run`, against current
+// state. That is the whole point of it: whether an element was rendered is a decision made once, at
+// socket open, and the client outlives it. The handler table is built from one `render_page()` and
+// lives for the session, so every id ever registered stays reachable — on a hidden element, on a
+// `disabled` one, or under a permission since revoked. Rendering is not authorization; this is.
+//
+// para/html never builds a guard and never interprets one. It has no notion of a user, a session, or
+// a permission — the closure comes from the app, and the only thing this package does is call it.
 pub struct Binding {
     event: DomEvent
     run: (string) -> void
+    guard: ?() -> bool
+
+    // Gate this binding on a check run at event time:
+    //
+    //     <button ${on_click(fn() => todos.remove(t.id)).only_if(fn() => user.can_edit(t))}>
+    //
+    // A false verdict drops the event exactly the way an unknown id is already dropped — silently,
+    // with no reply. A denial is either a bug or an attack, and neither wants a UI string this
+    // package invented. An app that wants to *say* something writes that check inside `run` instead;
+    // `only_if` is for the boundary, not the message.
+    fn only_if(can: () -> bool): Binding {
+        return Binding { event: self.event, run: self.run, guard: some(can) }
+    }
+}
+
+// The binding a lookup falls back to: bound to nothing, guarded by nothing, does nothing. Exists so
+// the dispatch path and the table folds read a total `get_or` rather than an `?Binding` each site has
+// to unwrap — an id that is not in the table never reaches it (`handlers.has` gates the dispatch).
+fn inert_binding(): Binding {
+    return Binding { event: DomEvent.Click, run: fn(_: string) {}, guard: none }
+}
+
+// Dispatch one client event against a page's handler table: look the binding up, consult its guard,
+// run it. Returns whether the handler actually ran — false for an id that is not in the table, and
+// false for a guard that refused. Both are dropped the same way, silently: an unknown id is a stale
+// page or a probe, and a refusal is a bug or an attack; neither wants a reply this package invented.
+//
+// THE dispatch entry point, and the reason it is `pub`. The websocket session calls it, and a
+// browserless test drives the exact same function (`examples/liveview-events`) — so the no-socket
+// rehearsal of the event model cannot drift from what the server actually does. An unguarded binding
+// always runs, so a page that never calls `only_if` behaves precisely as it did before guards existed.
+pub fn dispatch(handlers: Map<string, Binding>, name: string, value: string): bool {
+    if !handlers.has(name) {
+        return false
+    }
+    b = handlers.get_or(name, inert_binding())
+    admitted = match b.guard {
+        none => true,
+        some(can) => can(),
+    }
+    if admitted {
+        b.run(value)
+    }
+    return admitted
 }
 
 // The `data-live-*` wire marker for an event kind. The client shim (`live_js`) listens for the DOM
@@ -74,25 +130,26 @@ fn wire_attr(e: DomEvent): string {
 // Bind a **click**. The overwhelmingly common case, so it takes a bare `() -> void` — the click
 // carries no payload.
 pub fn on_click(handler: () -> void): Binding {
-    return Binding { event: DomEvent.Click, run: fn(_: string) => handler() }
+    return Binding { event: DomEvent.Click, run: fn(_: string) => handler(), guard: none }
 }
 
 // Bind an **input** — the handler receives the field's current value on every keystroke.
 pub fn on_input(handler: (string) -> void): Binding {
-    return Binding { event: DomEvent.Input, run: handler }
+    return Binding { event: DomEvent.Input, run: handler, guard: none }
 }
 
 // Bind a form **submit** — the handler receives the form's **decoded fields**, keyed by input name.
 // The client prevents the default navigation so the page stays live.
 //
 // The wire carries `application/x-www-form-urlencoded` (`title=buy+milk&note=caf%C3%A9`), which is
-// what the dispatch table's `(string) -> void` delivers. Handing that raw to the handler leaked the
+// what the dispatch table's `Binding.run` delivers. Handing that raw to the handler leaked the
 // wire format into every app and made each one re-implement percent-decoding — so this wraps the
 // user's handler the way `on_click` does and parses once, through `std.http.server`'s codec.
 pub fn on_submit(handler: (Map<string, string>) -> void): Binding {
     return Binding {
         event: DomEvent.Submit,
         run: fn(body: string) => handler(server.parse_form(body)),
+        guard: none,
     }
 }
 
@@ -229,7 +286,7 @@ fn render_value(v: dyn): string {
 struct Keyed {
     keys_now: () -> List<string>
     make_row: (string) -> dyn
-    row_handlers: (string) -> Map<string, (string) -> void>
+    row_handlers: (string) -> Map<string, Binding>
 }
 
 // A keyed region as the session reconciles it: the stable region id (one per `${keyed(…)}` hole,
@@ -241,7 +298,7 @@ pub struct KeyedRegion {
     prev: Signal<List<string>>
     keys_now: () -> List<string>
     make_row: (string) -> dyn
-    row_handlers: (string) -> Map<string, (string) -> void>
+    row_handlers: (string) -> Map<string, Binding>
 }
 
 // One row's persistent `computed`: it re-derives *its* item from the source signal by key on every
@@ -274,15 +331,15 @@ fn row_handlers_of<T>(
     key: string,
     key_of: (T) -> string,
     render_row: (T) -> Html,
-): Map<string, (string) -> void> {
+): Map<string, Binding> {
     cur = source.get().filter(fn(x) => key_of(x) == key)
     if cur.len() == 0 {
         return {}
     }
     rh = render_row(cur[0]).handlers
-    mut out: Map<string, (string) -> void> = {}
+    mut out: Map<string, Binding> = {}
     for hid in rh.keys() {
-        out = out.set("${key}-${hid}", rh.get_or(hid, fn(_: string) {}))
+        out = out.set("${key}-${hid}", rh.get_or(hid, inert_binding()))
     }
     return out
 }
@@ -460,7 +517,7 @@ pub fn keyed_op_stream(prev: List<string>, next: List<string>): string {
 // closures).
 pub struct Reconcile {
     frame: string
-    handlers: Map<string, (string) -> void>
+    handlers: Map<string, Binding>
 }
 
 // Reconcile one keyed region against the current key sequence and produce its structural patch.
@@ -469,7 +526,7 @@ pub struct Reconcile {
 // fresh `computed`, exposed under their marker id, with their initial markup carried inline in the
 // op; moved rows keep their `computed` and their DOM element (state and focus survive the reorder).
 // The content of surviving rows still rides the ordinary per-row diff — this only moves the boxes.
-pub fn reconcile_region(reg: KeyedRegion, v: View, handlers: Map<string, (string) -> void>): Reconcile {
+pub fn reconcile_region(reg: KeyedRegion, v: View, handlers: Map<string, Binding>): Reconcile {
     keys_now = reg.keys_now
     make_row = reg.make_row
     row_handlers = reg.row_handlers
@@ -503,7 +560,7 @@ pub fn reconcile_region(reg: KeyedRegion, v: View, handlers: Map<string, (string
                 v.expose(rid, c)
                 rh = row_handlers(op.key)
                 for hid in rh.keys() {
-                    h = h.set(hid, rh.get_or(hid, fn(_: string) {}))
+                    h = h.set(hid, rh.get_or(hid, inert_binding()))
                 }
                 inner = computed_string(c)
                 html = "<span data-live-html=\"${rid}\">${inner}</span>"
@@ -525,13 +582,13 @@ pub fn reconcile_region(reg: KeyedRegion, v: View, handlers: Map<string, (string
 // matches the attribute the client reports. Used to hoist a nested/keyed child's handlers up to the
 // page's single dispatch table.
 fn merge_handlers(
-    into: Map<string, (string) -> void>,
-    from: Map<string, (string) -> void>,
+    into: Map<string, Binding>,
+    from: Map<string, Binding>,
     prefix: string,
-): Map<string, (string) -> void> {
+): Map<string, Binding> {
     mut out = into
     for hid in from.keys() {
-        out = out.set("${prefix}${hid}", from.get_or(hid, fn(_: string) {}))
+        out = out.set("${prefix}${hid}", from.get_or(hid, inert_binding()))
     }
     return out
 }
@@ -552,7 +609,7 @@ pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
     mut skeleton = ""
     mut exposed: List<dyn> = []
     mut ids: List<string> = []
-    mut handlers: Map<string, (string) -> void> = {}
+    mut handlers: Map<string, Binding> = {}
     mut regions: List<KeyedRegion> = []
     // Attribute bindings whose element has not closed its tag yet — `aN:name` pairs, emitted as one
     // `data-live-attr` on the element as soon as a static carries the `>`. Carried rather than
@@ -603,9 +660,9 @@ pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
             } else if in_tag(skeleton) && binding != none {
                 // Attribute position, inline event handler: register the closure and emit the event's
                 // wire marker (`data-live-click="eN"`) so a client event routes straight to it.
-                b = binding ?? Binding { event: DomEvent.Click, run: fn(_: string) {} }
+                b = binding ?? inert_binding()
                 hid = "e${i}"
-                handlers = handlers.set(hid, b.run)
+                handlers = handlers.set(hid, b)
                 skeleton = skeleton ~ "${wire_attr(b.event)}=\"${hid}\""
             } else if in_tag(skeleton) {
                 // Attribute position: inline the escaped value — a `<span>` marker would be illegal
@@ -753,6 +810,99 @@ fn document(title: string, page: Html, styles: ?Css): string {
     return "${head}${page.skeleton}\n<script src=\"/live.js\"></script></body></html>\n"
 }
 
+// One wake of a live session: a client frame, or an idle tick. The unit an interceptor layers over —
+// para/html's own vocabulary for "something happened", carrying nothing about who the client is.
+//
+// `origin` is the request that opened the socket, carried so a layer can recover whatever the upgrade
+// carried (a cookie, a header). This package never reads it; it only hands it over.
+//
+// Every field is `pub`: a wake is the value a *host framework* layers over, and a layer that cannot
+// read what it is layering over is useless. Contrast `Binding`, whose fields stay private — a binding
+// is this package's own bookkeeping, and only `dispatch` has business running one.
+pub struct Wake {
+    // The handler id the client named and the payload it sent. Both empty on an idle tick.
+    pub name: string
+    pub value: string
+    // True when no client frame arrived — the session woke on its own timer. A tick runs `on_tick`
+    // rather than a handler, and is exempt from the client-facing limits: there is no client behind
+    // it to rate-limit, and no payload to bound.
+    pub tick: bool
+    // The request that opened the socket, or `none` on the browserless path — the same shape and the
+    // same reason as aether's `request_arg(req: ?Request)`: a live request exists only on the server
+    // path, and forcing one would make the onion untestable without a real socket. A layer that needs
+    // the request must decide what absence means for it, and should fail closed.
+    pub origin: ?Request
+}
+
+// Build a wake by hand. The socket path builds its own with `wake_of`; this is the door a *host
+// framework* tests its layers through, without a browser or a socket — the same reason `dispatch` and
+// `within_limits` are `pub`. A wake built here carries no origin.
+pub fn wake(name: string, value: string, tick: bool): Wake {
+    return Wake { name: name, value: value, tick: tick, origin: none }
+}
+
+// Parse one wake off the socket. A malformed or non-`event` frame yields a wake bound to no handler,
+// which `dispatch` then refuses by id — so a garbage frame costs a parse and nothing else.
+fn wake_of(msg: ?string, idle: bool, origin: Request): Wake {
+    if idle {
+        return Wake { name: "", value: "", tick: true, origin: some(origin) }
+    }
+    evt = json.parse(msg ?? "{}")
+    if "${evt["type"]}" != "event" {
+        return Wake { name: "", value: "", tick: false, origin: some(origin) }
+    }
+    return Wake { name: "${evt["name"]}", value: "${evt["value"]}", tick: false, origin: some(origin) }
+}
+
+// --- The unconditional limits. -----------------------------------------------------------------
+//
+// These are enforced in `session` itself, for every page, with no way to opt out and no interceptor
+// involved. That placement is the deliberate part. The obvious alternative is to ship them as onion
+// layers in the companion `para/aether_html` package — but a layer only exists on the *mounted* path,
+// which would leave the standalone one-file page (`handle(req, title, page)`, the simplest and most
+// common way a LiveView app gets written) as the one with no protections at all. A limit no app
+// should have to ask for belongs where every app already is.
+//
+// The division the arc settles on: para/html carries the limits, the onion carries app policy.
+
+// The largest event payload a client may send, in characters. Generous for anything this wire is
+// for — a click carries nothing, an input carries a field, a submit carries a form — and small
+// enough that a hostile frame cannot make the server hold an arbitrary string. A frame over the cap
+// is dropped whole: it never reaches a handler, an interceptor, or the reactive graph. File uploads
+// do not belong on this wire; they belong on an ordinary HTTP route.
+pub fn max_payload_chars(): int {
+    return 262144
+}
+
+// The most client frames a session will admit per second. Well above any human input rate — fast
+// typing on an `on_input` is ~15/s and a dragged range input ~60/s — so it bounds a flood by an order
+// of magnitude without ever touching a real interaction. Frames over the cap are dropped, not queued:
+// queueing a flood is how a rate limit becomes the memory exhaustion it was meant to prevent.
+//
+// Measured against `datetime.now()`, the real wall clock. `time.monotonic()` cannot serve here — it
+// is a *logical* counter that advances one tick per call and only tracks real time across an explicit
+// sleep, so a rate computed from it would be meaningless.
+pub fn max_frames_per_second(): int {
+    return 120
+}
+
+// Whether a wake clears the unconditional limits. `in_window` is how many client frames have been
+// counted in the current one-second window, this one included.
+//
+// A tick always clears: it has no client behind it to rate-limit and no payload to bound. Everything
+// else is decided here rather than inline in `session` for the same reason `dispatch` is a function —
+// the loop needs a socket to run, so a decision left inside it could not be tested without one, and
+// an untestable limit is a limit that quietly stops holding.
+pub fn within_limits(tick: bool, payload: string, in_window: int): bool {
+    if tick {
+        return true
+    }
+    if payload.len() > max_payload_chars() {
+        return false
+    }
+    return in_window <= max_frames_per_second()
+}
+
 // How often an idle session wakes to publish state that changed with no client event behind it.
 // Short enough to feel immediate, long enough that an idle page costs a timer and a diff check.
 // `handle_every` takes it explicitly for a page that wants a different cadence.
@@ -779,6 +929,8 @@ async fn session(
     render_page: () -> Html,
     every_ms: int,
     on_tick: () -> void,
+    origin: Request,
+    intercept: ?(Wake, () -> void) -> void,
 ): bool {
     page = render_page()
     v = view()
@@ -787,10 +939,16 @@ async fn session(
         v.expose(page.ids[i], c)
         i = i + 1
     }
-    // The dispatch table is mutable across the session: a keyed row that joins registers its inline
-    // handlers, a row that leaves drops them (see `reconcile_region`).
-    mut handlers = page.handlers
+    // The dispatch table changes across the session — a keyed row that joins registers its inline
+    // handlers, a row that leaves drops them (see `reconcile_region`) — and the wake thunk below
+    // both reads and replaces it. A `signal` rather than a `mut` local because a closure captures a
+    // binding, not a cell: the same reason `KeyedRegion.prev` is a signal.
+    table = signal(page.handlers)
     sock.send(v.snapshot())
+    // Frame-rate accounting for `within_limits`, carried across iterations: the current one-second
+    // window's start (real ms) and how many frames have been admitted inside it.
+    mut window_start = datetime.now().unix_ms()
+    mut in_window = 0
     mut going = true
     while going {
         msg = sock.recv_timeout(every_ms).await
@@ -799,35 +957,51 @@ async fn session(
         if msg == none && !idle {
             going = false
         } else {
-            if idle {
-                on_tick()
-            } else {
-                evt = json.parse(msg ?? "{}")
-                kind = evt["type"]
-                if kind == "event" {
-                    raw_name = evt["name"]
-                    raw_value = evt["value"]
-                    name = "${raw_name}"
-                    value = "${raw_value}"
-                    if handlers.has(name) {
-                        handler = handlers.get_or(name, fn(_: string) {})
-                        handler(value)
+            w = wake_of(msg, idle, origin)
+            // The unconditional limits, checked before ANY app code runs and before an interceptor
+            // is consulted — see `max_payload_chars`/`max_frames_per_second` for why they are not
+            // layers. A tick is exempt: it has no client behind it to rate-limit or oversize.
+            now_ms = datetime.now().unix_ms()
+            if now_ms - window_start >= 1000 {
+                window_start = now_ms
+                in_window = 0
+            }
+            in_window = in_window + 1
+            if within_limits(w.tick, w.value, in_window) {
+                // The rest of the wake, as a value: run the handler (or the tick), reconcile every
+                // keyed region, push the diff. Handed to an interceptor as its `next` so a layer can
+                // wrap the whole wake — measure it, or decline to run it — exactly as aether's
+                // `Next.run` is the rest of an HTTP pipeline. See `docs/FrameOnion.md`.
+                proceed = fn() {
+                    if w.tick {
+                        on_tick()
+                    } else {
+                        // Guard-then-run, checked HERE — on the wake the event arrived on, not at
+                        // the render that emitted the marker (see `Binding.guard`). The verdict is
+                        // dropped: the reconcile and diff below run either way, so a refused event
+                        // simply leaves the page as it was.
+                        dispatch(table.get(), w.name, w.value)
+                    }
+                    // Structural reconcile first — a keyed list may have gained, lost, or reordered
+                    // rows; push its minimal insert/remove/move ops, and unexpose/expose the affected
+                    // row bindings so the content diff that follows neither pushes a gone row nor
+                    // re-pushes a fresh one.
+                    for reg in page.regions {
+                        res = reconcile_region(reg, v, table.get())
+                        table.set(res.handlers)
+                        if res.frame != "" {
+                            sock.send(res.frame)
+                        }
+                    }
+                    patch = v.diff() ?? ""
+                    if patch != "" {
+                        sock.send(patch)
                     }
                 }
-            }
-            // Structural reconcile first — a keyed list may have gained, lost, or reordered rows;
-            // push its minimal insert/remove/move ops, and unexpose/expose the affected row bindings
-            // so the content diff that follows neither pushes a gone row nor re-pushes a fresh one.
-            for reg in page.regions {
-                res = reconcile_region(reg, v, handlers)
-                handlers = res.handlers
-                if res.frame != "" {
-                    sock.send(res.frame)
+                match intercept {
+                    none => proceed(),
+                    some(layer) => layer(w, proceed),
                 }
-            }
-            patch = v.diff() ?? ""
-            if patch != "" {
-                sock.send(patch)
             }
         }
     }
@@ -857,7 +1031,7 @@ pub fn handle_styled(
     render_page: () -> Html,
     styles: Css,
 ): Response {
-    return handle_all(req, title, render_page, poll_ms(), fn() {}, some(styles))
+    return handle_all(req, title, render_page, poll_ms(), fn() {}, some(styles), none)
 }
 
 // `handle` with the session's idle tick under your control: `every_ms` between wakes, and `on_tick`
@@ -882,20 +1056,31 @@ pub fn handle_every(
     every_ms: int,
     on_tick: () -> void,
 ): Response {
-    return handle_all(req, title, render_page, every_ms, on_tick, none)
+    return handle_all(req, title, render_page, every_ms, on_tick, none, none)
 }
 
-// The one implementation the three entry points delegate to.
-fn handle_all(
+// The one implementation the sugar entry points delegate to, and the full-control door in its own
+// right — `pub` because a host framework needs every knob at once.
+//
+// `intercept` is the seam the companion `para/aether_html` package is built on: a layer receives each
+// `Wake` and the rest of the work as a thunk, so it may measure the wake, run it, or decline to run
+// it — the same shape as aether's `Next.run`, one level down. It is deliberately phrased in nothing
+// but para/html's own vocabulary: this package never learns what a user or a permission is, and an
+// app that passes `none` (which every sugar entry point does) behaves exactly as it always has.
+//
+// The unconditional limits in `session` are NOT part of this seam and cannot be layered away — see
+// `max_payload_chars`. An interceptor only ever sees wakes that already cleared them.
+pub fn handle_all(
     req: Request,
     title: string,
     render_page: () -> Html,
     every_ms: int,
     on_tick: () -> void,
     styles: ?Css,
+    intercept: ?(Wake, () -> void) -> void,
 ): Response {
     if req.path() == "/ws" {
-        return server.websocket(fn(sock) => session(sock, render_page, every_ms, on_tick))
+        return server.websocket(fn(sock) => session(sock, render_page, every_ms, on_tick, req, intercept))
     }
     if req.path() == "/live.js" {
         return server.response(200, live_js(), {"content-type": "application/javascript"})

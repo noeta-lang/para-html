@@ -136,6 +136,19 @@ return handle_every(req, "Todos", page, 500, refresh)
 
 With that, a write from *any* connection — psql, a background job, a second worker — reaches every open page within the tick. With plain `handle` the tick runs a no-op, so the queue is only drained when a handler happens to drain it, and an external write waits for the next click.
 
+## What crosses the wire, and what does not
+
+State lives in signals **on the server**; the browser is a thin view. This is Phoenix-LiveView's model, not LiveWire's — a component's properties are never serialized into the page and round-tripped, which is why there is no equivalent of LiveWire's `#[Locked]` or hidden-property attribute here. There is nothing to hide, because nothing is sent.
+
+Server to client: hole id → rendered string, plus keyed structural ops. Client to server: a handler **id** and a payload string. The closures never leave the session's table.
+
+Two things still deserve care, and both are about what an author writes rather than what the transport does:
+
+- **A struct in a hole discloses every field.** `${user}` renders as escaped text — through the type's `to_string` if it has one, otherwise `User {id: 1, email: "…", password_hash: "…"}`. An `impl Display` fixes it per type, once.
+- **A registered handler is reachable for the whole session.** The table is built from one `render_page()` at socket open, so not rendering a button gates nothing — the client picks the id, and hidden, `disabled`, and since-revoked all stay reachable. Guard the binding instead, which is re-checked at event time: `on_click(del).only_if(fn() => user.can_edit(t))`.
+
+A payload cap and a frame-rate cap apply to every page unconditionally, in the session loop itself. Anything richer — per-frame identity, per-action budgets, tracing — hangs off `handle_all`'s optional interceptor, which is what [para/aether_html](https://github.com/noeta-lang/para-aether-html) builds its onion on.
+
 ## Current limitations
 
 - **Signal state is per worker isolate.** Under `noeta serve --parallel N` each worker runs the program in its own isolate, so a value that lives *in a signal* is not shared across the fleet — two browsers on different workers see different counters. This is a limit on where the **source of truth** lives, not on LiveView: an app backed by a database is fine on all cores, because each worker opens its own connection and drains its own notifications (`para/db`'s `LiveRepository` over Postgres `LISTEN`/`NOTIFY` is exactly this). An app whose truth is an in-memory signal wants a single worker until session state is shared.
