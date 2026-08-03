@@ -135,3 +135,67 @@ fn limits(): void {
 }
 
 main()
+
+// The guard and the limits are security behavior, so they are `@test`s rather than `echo`s: CI runs
+// `noeta check` + `noeta test`, never `noeta run`, so an assertion that only prints is an assertion
+// CI does not gate. Each test builds its own page and signals — `noeta test` runs every test in a
+// fresh isolate and never executes top-level statements, so nothing here may lean on the demo state
+// above.
+@test {
+    // Whether an element was rendered is decided once, at socket open; the handler table then stays
+    // reachable for the session. So the same id must run or not run purely on what the guard says NOW.
+    fn a_guard_is_consulted_at_event_time_not_render_time(): void {
+        allowed = signal(false)
+        hits = signal(0)
+        g = @html {
+            <button ${on_click(fn() => hits.update(fn(n) => n + 1)).only_if(fn() => allowed.get())}>danger</button>
+        }
+        assert(!html.dispatch(g.handlers, "e0", ""), "a refused frame must report false")
+        assert(hits.get() == 0, "a refused frame must not run its handler")
+        allowed.set(true)
+        assert(html.dispatch(g.handlers, "e0", ""), "the same id must run once the guard admits it")
+        assert(hits.get() == 1, "an admitted frame runs its handler exactly once")
+    }
+
+    // A guard must be invisible on the wire: if a guarded element were marked differently, a client
+    // could enumerate which actions are protected and probe only the open ones.
+    fn a_guarded_binding_is_indistinguishable_on_the_wire(): void {
+        g = @html { <button ${on_click(fn() {}).only_if(fn() => false)}>x</button> }
+        open_ = @html { <button ${on_click(fn() {})}>x</button> }
+        assert(g.skeleton.contains("data-live-click=\"e0\""), g.skeleton)
+        assert(open_.skeleton.contains("data-live-click=\"e0\""), open_.skeleton)
+    }
+
+    // An unknown id and a denied one are dropped the same silent way — a denial is a bug or an
+    // attack, and neither gets a reply this package invented.
+    fn an_unknown_id_is_refused_like_a_denied_one(): void {
+        g = @html { <button ${on_click(fn() {})}>x</button> }
+        assert(!html.dispatch(g.handlers, "e9", ""), "an unregistered id must never dispatch")
+    }
+
+    // An unguarded binding is unaffected by guards existing at all.
+    fn an_unguarded_binding_always_runs(): void {
+        hits = signal(0)
+        g = @html { <button ${on_click(fn() => hits.update(fn(n) => n + 1))}>x</button> }
+        assert(html.dispatch(g.handlers, "e0", ""))
+        assert(hits.get() == 1)
+    }
+
+    // The caps apply to every page with no opt-out; a frame over either one is dropped whole.
+    fn the_payload_cap_is_a_ceiling_not_a_fence(): void {
+        assert(html.within_limits(false, "buy milk", 1), "an ordinary payload passes")
+        assert(html.within_limits(false, "x".repeat(html.max_payload_chars()), 1), "exactly at the cap passes")
+        assert(!html.within_limits(false, "x".repeat(html.max_payload_chars() + 1), 1), "one over is refused")
+    }
+
+    fn the_rate_cap_admits_its_budget_and_no_more(): void {
+        assert(html.within_limits(false, "", html.max_frames_per_second()), "the last frame in budget passes")
+        assert(!html.within_limits(false, "", html.max_frames_per_second() + 1), "the frame past budget is refused")
+    }
+
+    // A tick has no client behind it to rate-limit and no payload to bound.
+    fn a_tick_is_exempt_from_both_caps(): void {
+        huge = "x".repeat(html.max_payload_chars() + 1)
+        assert(html.within_limits(true, huge, html.max_frames_per_second() * 100))
+    }
+}
