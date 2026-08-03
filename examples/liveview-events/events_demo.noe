@@ -147,9 +147,7 @@ main()
     fn a_guard_is_consulted_at_event_time_not_render_time(): void {
         allowed = signal(false)
         hits = signal(0)
-        g = @html {
-            <button ${on_click(fn() => hits.update(fn(n) => n + 1)).only_if(fn() => allowed.get())}>danger</button>
-        }
+        g = @html { <button ${on_click(fn() => hits.update(fn(n) => n + 1)).only_if(fn() => allowed.get())}>danger</button> }
         assert(!html.dispatch(g.handlers, "e0", ""), "a refused frame must report false")
         assert(hits.get() == 0, "a refused frame must not run its handler")
         allowed.set(true)
