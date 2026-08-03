@@ -10,7 +10,8 @@ One pure-Noeta module, `para.html`:
 | --- | --- | --- |
 | `render` | `@html` tier handler | importing it brings the `@html { … }` expression tier into scope |
 | `Html` | struct | a compiled template: the static `skeleton`, the per-hole computeds (`holes` + `ids`), the inline event table (`handlers`), and the keyed-list `regions` |
-| `handle(req, title, render_page)` | fn | the request/websocket handler that serves the page, the client shim, and the diff-push session |
+| `handle(req, title, render_page, …)` | fn | the request/websocket handler that serves the page, the client shim, and the diff-push session; everything past `render_page` is an optional named argument |
+| `serves(base, path)` | fn | whether a path belongs to a page mounted at `base` — the predicate a host framework gates a mount with |
 | `DomEvent` | enum | the typed event kinds a template binds: `Click`, `Input`, `Submit` |
 | `Binding` | struct | one inline handler paired with its `DomEvent` |
 | `on_click` / `on_input` / `on_submit` | fn | typed inline event binders, each returning a `Binding` |
@@ -165,7 +166,7 @@ Use `keyed` for any list a client edits — rows mutating in place *or* rows com
 
 `handle(req, title, render_page)` is the whole server surface. An app's `fn fetch(req)` delegates to it, so it runs under `noeta serve` like any `std.http.server` app. It routes three paths:
 
-- **any page path** — the server-rendered document: the template's static skeleton with every hole filled with its initial value (a no-flash first paint), plus a `<script src="/live.js">` tag;
+- **any page path** — the server-rendered document: the template's static skeleton with every hole filled with its initial value (a no-flash first paint), plus a `<script src="…/live.js">` tag;
 - **`/live.js`** — the bundled client shim: a dependency-free script that connects the websocket, applies patches, and reports events (it reconnects automatically if the socket drops);
 - **`/ws`** — the websocket session that drives the live page.
 
@@ -180,7 +181,28 @@ The session renders the page, builds a `view()` over the per-hole computeds, and
 
 On the client, the marker attribute alone decides how a value lands: a **text** hole (`data-live`) patches via `textContent` (escaped), a **markup** hole or keyed row (`data-live-html`) via `innerHTML` — so a reactive list of rows updates in place.
 
-A session also wakes on an **idle tick** (`poll_ms()`, 500ms) and diffs anyway, so a change no client event caused still reaches the page — another user's click, a finished job. `handle_every(req, title, page, every_ms, on_tick)` runs your own pull on each wake, for state that has to be *drained* rather than merely observed (a Postgres `NOTIFY` queue via `LiveRepository.pump()`, a p2p log via `sync()`).
+A session also wakes on an **idle tick** (`poll_ms()`, 500ms) and diffs anyway, so a change no client event caused still reaches the page — another user's click, a finished job. `on_tick:` runs your own pull on each wake, for state that has to be *drained* rather than merely observed (a Postgres `NOTIFY` queue via `LiveRepository.pump()`, a p2p log via `sync()`).
+
+### Everything past `render_page` is optional and named
+
+`handle` is one door with defaults rather than a family of entry points, which stays readable as knobs accumulate:
+
+```noeta
+handle(req, "Counter", page)                                  // the whole standalone story
+handle(req, "Styled", page, styles: some(sheet))              // a `@css` value in the document head
+handle(req, "Chat", page, every_ms: 250, on_tick: drain)      // your own pull on each idle wake
+handle(req, "Todos", page, base: "/todos", intercept: onion)  // mounted, with a frame onion
+```
+
+### Mounting under a prefix
+
+`base:` moves the page's three URLs under a prefix — `base: "/todos"` serves `/todos`, `/todos/ws`, and `/todos/live.js` — so a LiveView page can live beside other routes instead of owning the origin.
+
+The two modes differ in exactly one way, and it is deliberate. A page at the **root** (the default) answers *every* unmatched path, which is what makes a one-file app a whole site with no router. A **mounted** page answers exactly its three URLs; a mount that swallowed unmatched paths would quietly become the app's 404 handler for every route registered after it. `serves(base, path)` is that rule as a function, and a host framework should gate its mount with the same predicate rather than reimplementing it.
+
+Each mount serves its own copy of the shim rather than sharing one app-wide. The copies are identical and browser-cached per URL, and the alternative splits ownership of a para/html route between this package and whatever mounted it — which is how two modes start to drift.
+
+[para/aether_html](https://github.com/noeta-lang/para-aether-html)'s `LiveMount` is this wired into aether's middleware onion.
 
 > [!NOTE]
 > Signal state lives in the worker isolate that handled the connection, so under `noeta serve --parallel N` it is not shared across the fleet. An app whose source of truth is a **database** serves fine on all cores (each worker drains its own notifications); an app whose source of truth is an **in-memory signal** wants a single worker.
@@ -209,7 +231,7 @@ The guard is re-checked on the wake the event arrives on, against current state.
 
 **Two limits apply to every page, unconditionally.** A payload cap (`max_payload_chars`, 256k) and a frame-rate cap (`max_frames_per_second`, 120) are enforced in the session loop itself, with no way to opt out. They are deliberately not something a framework layers on: a limit that only existed for apps which adopted some other package would leave the plain one-file page — the most common way these get written — with no protections at all.
 
-For cross-cutting concerns that need more than this (per-frame identity, per-action rate budgets, tracing), `handle_all` takes an optional interceptor over each `Wake`; [para/aether_html](https://github.com/noeta-lang/para-aether-html) is the onion built on it.
+For cross-cutting concerns that need more than this (per-frame identity, per-action rate budgets, tracing), `handle`'s `intercept:` argument takes a layer over each `Wake`; [para/aether_html](https://github.com/noeta-lang/para-aether-html) is the onion built on it.
 
 ## Testing without a browser
 

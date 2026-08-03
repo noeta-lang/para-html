@@ -1,6 +1,6 @@
 # The per-frame onion — design note
 
-**Status:** proposed. Spans three packages: `para/html` (the seam), `para/aether` (unchanged), and a new companion `para/aether_live` (the onion).
+**Status:** shipped — para/html 0.3.0 (the seam) and 0.4.0 (prefix mounting), para/aether_html 0.1.0. Spans three packages: `para/html` (the seam), `para/aether` (unchanged), and a new companion `para/aether_live` (the onion).
 
 ## The problem
 
@@ -64,7 +64,7 @@ pub struct Wake {
 }
 ```
 
-`handle_all` grows an optional interceptor parameter, `(Wake, () -> void) -> void`. The second argument is the rest of the work — dispatch, reconcile, diff — as a thunk, exactly as `Next.run` is the rest of the HTTP pipeline. Not calling it drops the wake, and the page simply does not change.
+`handle` grows an optional `intercept:` argument, `(Wake, () -> void) -> void`. The second argument is the rest of the work — dispatch, reconcile, diff — as a thunk, exactly as `Next.run` is the rest of the HTTP pipeline. Not calling it drops the wake, and the page simply does not change.
 
 **Decision — the seam wraps the whole wake, not just the dispatch.** The thunk covers the handler call *and* `reconcile_region` *and* `v.diff()`. Preceding the dispatch would be a hook; wrapping the wake is an onion, and it is the only version where a layer can measure what an event actually cost (a click that pushed 40 KB) or short-circuit the real work.
 
@@ -90,7 +90,7 @@ Note `void`, not `Response` — the reason this is a sibling trait rather than `
 
 `mount_live(app, path, title, page)` registers the page route, the `/ws` upgrade, and the shared shim, and wires the onion as the interceptor.
 
-**Open — shim-route ownership.** One `/live.js` shared across every mounted page is obviously right, but that makes it the app's route rather than the page's, so the two modes answer it from different owners. Decide when `mount_live` is written.
+**Resolved — shim-route ownership.** Each mount serves its own copy of the shim at `${base}/live.js` rather than sharing one app-wide. The copies are identical and browser-cached per URL, so the duplication costs nothing measurable; sharing one would have split ownership of a para/html route between this package and whatever mounted it, which is precisely how two modes drift. para/html owns its three routes in both modes, relative to a base, and `serves(base, path)` is the single predicate both its own routing and a host framework's mount gate read.
 
 ## What the onion cannot do, and why the binding guard still exists
 
@@ -105,7 +105,7 @@ They are complementary. The guard closes the live hole in one file; the onion is
 
 - **S1** — para/html: unconditional payload + frame-rate caps in `session`.
 - **S2** — para/html: `Binding.guard`, the `Map<string, Binding>` handler table, guarded dispatch.
-- **S3** — para/html: the `Wake` seam on `handle_all`, standalone path unchanged.
+- **S3** — para/html: the `Wake` seam on `handle`, standalone path unchanged.
 - **S4** — new package `para/aether_live`: `Frame`, `FrameMiddleware`, `FrameNext`, `mount_live`.
 - **S5** — para/aether_live: the layers — per-frame identity via `SessionStore`, authorize, rate limit.
 - **S6** — the drift gate: a differential test driving the same page standalone and mounted, asserting identical wire output.
