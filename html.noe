@@ -30,14 +30,15 @@ use std.datetime
 // before running it (see `Binding.guard`).
 pub struct Html {
     // `skeleton` and `handlers` are the page's inspectable surface: the served markup and the event
-    // table a client event routes through. They are `pub` so a test can drive the whole model with no
-    // browser and no socket — assert the skeleton escaped a value, look a binding up by its id and
-    // `.run` it — exactly the way the websocket session does. The examples under `examples/liveview-*`
-    // read them the same way.
-    pub skeleton: string
+    // table a client event routes through. A `struct` is the value kind, so every field here is
+    // public and none carries a `pub` — that is what lets a test drive the whole model with no
+    // browser and no socket: assert the skeleton escaped a value, look a binding up by its id and
+    // `.run` it, exactly the way the websocket session does. The examples under `examples/liveview-*`
+    // read them the same way. Anything that should be hidden belongs in a `class`, not here.
+    skeleton: string
     holes: List<dyn>
     ids: List<string>
-    pub handlers: Map<string, Binding>
+    handlers: Map<string, Binding>
     // Keyed-list regions on this page (one per `${keyed(…)}` hole). The websocket session reconciles
     // each after every event: it diffs the region's key sequence and pushes minimal structural ops
     // (insert / remove / move) so add / prepend / remove / reorder patch in place instead of
@@ -80,7 +81,7 @@ pub struct Binding {
     // with no reply. A denial is either a bug or an attack, and neither wants a UI string this
     // package invented. An app that wants to *say* something writes that check inside `run` instead;
     // `only_if` is for the boundary, not the message.
-    fn only_if(can: () -> bool): Binding {
+    pub fn only_if(can: () -> bool): Binding {
         return Binding { event: self.event, run: self.run, guard: some(can) }
     }
 }
@@ -821,17 +822,17 @@ fn document(title: string, page: Html, styles: ?Css, base: string): string {
 // is this package's own bookkeeping, and only `dispatch` has business running one.
 pub struct Wake {
     // The handler id the client named and the payload it sent. Both empty on an idle tick.
-    pub name: string
-    pub value: string
+    name: string
+    value: string
     // True when no client frame arrived — the session woke on its own timer. A tick runs `on_tick`
     // rather than a handler, and is exempt from the client-facing limits: there is no client behind
     // it to rate-limit, and no payload to bound.
-    pub tick: bool
+    tick: bool
     // The request that opened the socket, or `none` on the browserless path — the same shape and the
     // same reason as aether's `request_arg(req: ?Request)`: a live request exists only on the server
     // path, and forcing one would make the onion untestable without a real socket. A layer that needs
     // the request must decide what absence means for it, and should fail closed.
-    pub origin: ?Request
+    origin: ?Request
 }
 
 // Build a wake by hand. The socket path builds its own with `wake_of`; this is the door a *host

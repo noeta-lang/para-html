@@ -8,7 +8,7 @@ One pure-Noeta module, `para.html`:
 
 | symbol | kind | purpose |
 | --- | --- | --- |
-| `render` | `@html` tier handler | importing it brings the `@html { … }` expression tier into scope |
+| `render` | `@html` tier handler | what a `@html { … }` block evaluates through, once your `[directives]` table binds `html` to this package |
 | `Html` | struct | a compiled template: the static `skeleton`, the per-hole computeds (`holes` + `ids`), the inline event table (`handlers`), and the keyed-list `regions` |
 | `handle(req, title, render_page, …)` | fn | the request/websocket handler that serves the page, the client shim, and the diff-push session; everything past `render_page` is an optional named argument |
 | `serves(base, path)` | fn | whether a path belongs to a page mounted at `base` — the predicate a host framework gates a mount with |
@@ -23,10 +23,17 @@ One pure-Noeta module, `para.html`:
 
 ```toml
 [dependencies]
-para = { version = "^0.1", package = "para/html" }
+para = { version = "^0.5", package = "para/html" }
+
+# A tier is bound, never imported: this table is what makes `@html { … }` an expression in your
+# program. Add `css = "para/html"` too if you write `@css { … }` blocks.
+[directives]
+html = "para/html"
 ```
 
 The package is keyed `para`, so its module addresses as `para.html`. It is pure Noeta — no `[trust]` entry needed.
+
+`use para.html.{render, …}` brings the *functions* into scope; the `[directives]` binding is what enables the `@html`/`@css` blocks themselves. Both are wanted: the import for the surface you call, the binding for the tier you write. (Before noeta 0.5 the import did double duty and the binding did not exist.)
 
 ## Usage
 
@@ -273,7 +280,7 @@ The full design write-up is in [`docs/LiveView.md`](docs/LiveView.md).
 
 ## Requirements
 
-None beyond the `noeta` toolchain — this package is pure Noeta.
+noeta 0.5 or later, and nothing else. The runtime surface is pure Noeta — no `[trust]` entry, no native code in your program. (The repo does ship dev-only tier-body formatters for `noeta fmt`, declared `dev-native`; they are compiled into the dev toolchain and never into a build of yours.)
 
 ## Development
 
