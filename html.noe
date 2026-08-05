@@ -906,7 +906,7 @@ pub fn within_limits(tick: bool, payload: string, in_window: int): bool {
 
 // How often an idle session wakes to publish state that changed with no client event behind it.
 // Short enough to feel immediate, long enough that an idle page costs a timer and a diff check.
-// `handle_every` takes it explicitly for a page that wants a different cadence.
+// `handle`'s `every_ms:` overrides it for a page that wants a different cadence.
 pub fn poll_ms(): int {
     return 500
 }
