@@ -245,7 +245,7 @@ For cross-cutting concerns that need more than this (per-frame identity, per-act
 An `Html` value is a plain, inspectable struct — the skeleton is a string and the dispatch table is a `Map` — so the whole event model exercises under `noeta run` / `noeta test` with no browser and no socket. Simulating a client event is exactly what the websocket session does: look up the closure by id, run it with the payload.
 
 ```noeta
-use para.html.{render, Html, on_click}
+use para.html.{render, Html, on_click, dispatch}
 use std.reactive.signal
 
 count = signal(0)
@@ -257,7 +257,7 @@ fn page() use (count): Html {
 fn main() use (count): void {
     p = page()
     echo p.skeleton.contains("data-live-click=\"e0\"")   // true — the binding's wire marker
-    p.handlers.get_or("e0", fn(_: string) {})("")        // fire the click
+    dispatch(p.handlers, "e0", "")                       // fire the click
     echo count.get()                                     // 1
 }
 
