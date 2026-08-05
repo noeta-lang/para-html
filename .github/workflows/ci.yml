@@ -1,7 +1,12 @@
 name: CI
 
-# The para/html package's CI: check + test every example program with a pinned released `noeta`.
-# This package is pure Noeta, so there is no Rust job.
+# The para/html package's CI, two jobs:
+#   - rust     : fmt / clippy (deny warnings) / test in each Rust crate — the `dev-native` tier-body
+#                formatters (`"html"`/`"css"` reflow for `noeta fmt`) and their entry crate, each its
+#                own workspace root. The formatters live behind the non-default `fmt` feature, so a
+#                bare `cargo test` runs nothing; the feature build is gated explicitly.
+#   - examples : the Noeta-level gate — install a pinned released `noeta`, then check + test every
+#                example program.
 #
 # NOTE: these workflows go green once the noeta toolchain repo is published under
 # github.com/noeta-lang/noeta and the ecosystem's pre-publish `file:///` git deps are flipped to it
@@ -27,6 +32,41 @@ env:
   NOETA_VERSION: ${{ vars.NOETA_VERSION || 'v0.1.0' }}
 
 jobs:
+  rust:
+    name: Rust crates (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # Workspace-less on purpose (each crate is its own workspace root, so the composed dev
+      # toolchain can adopt `native/` as a path dependency) — run per crate directory.
+      - name: cargo fmt --check
+        run: |
+          for crate in crates/*/ native/; do
+            (cd "${crate}" && cargo fmt --check)
+          done
+      - name: cargo clippy (deny warnings)
+        run: |
+          for crate in crates/*/ native/; do
+            (cd "${crate}" && cargo clippy --all-targets -- -D warnings)
+          done
+      - name: cargo test
+        run: |
+          for crate in crates/*/ native/; do
+            (cd "${crate}" && cargo test)
+          done
+      # The default build is the EMPTY extension (no malva, no formatters, no tests), which is what a
+      # consumer links. Every formatter test lives behind `fmt`, the feature the dev toolchain builds
+      # with — without this step the job would gate an empty crate and pass on anything.
+      - name: cargo clippy + test --features fmt (the dev-toolchain build)
+        working-directory: crates/noeta-para-html
+        run: |
+          cargo clippy --all-targets --features fmt -- -D warnings
+          cargo test --features fmt
+
   examples:
     name: Examples (noeta check + test)
     runs-on: ubuntu-latest

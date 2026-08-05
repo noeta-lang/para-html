@@ -3,4 +3,13 @@ name = "noeta/liveview_structural"
 version = "0.1.0"
 
 [dependencies]
-para = { path = "../.." }
+# Keyed `para` so the module addresses as `para.html`; the `package =` claim is what lets this
+# path dependency be named in `[directives]` below.
+para = { path = "../..", package = "para/html" }
+
+# The `@html { … }` tier directive this demo writes. A tier is bound, never imported — `use
+# para.html` brings in the functions, and this table is what makes the block an expression. Naming
+# the package (rather than the `para` dependency key) is what a directive binding takes, since one
+# key may cover several members.
+[directives]
+html = "para/html"

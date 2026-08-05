@@ -6,11 +6,14 @@
 - **[Reactivity](Reactivity)** — each hole becomes a `computed`, so a `signal` change recomputes *exactly* the affected holes, glitch-free.
 - **The reactive-view diff-push transport** (`std.reactive.view` + `std.http.server` websockets) — which serializes only the holes that changed and pushes a minimal patch to the browser.
 
-It ships as the **`para.html` package** (`packages/para-html/`): the `Html` type, the `@html` handler, and a `handle(req, …)` that wires up the page, the client shim, and the websocket session. It is a **first-party but non-default** package under the `para` ("alongside") namespace — maintained by the project, distributed through the package registry rather than baked into `std` (its sibling is the [`para.p2p`](Local-First-and-P2P) local-first package). A consumer keys the dependency `para`, imports `render` (which brings the `@html` tier into scope) and `handle`, and writes templates over signals:
+It ships as the **`para.html` package** (`packages/para-html/`): the `Html` type, the `@html` handler, and a `handle(req, …)` that wires up the page, the client shim, and the websocket session. It is a **first-party but non-default** package under the `para` ("alongside") namespace — maintained by the project, distributed through the package registry rather than baked into `std` (its sibling is the [`para.p2p`](Local-First-and-P2P) local-first package). A consumer keys the dependency `para`, binds the `html` tier directive to it, imports `render` and `handle`, and writes templates over signals. As of noeta 0.5 a tier is **bound, never imported**: the `[directives]` table is what makes `@html { … }` an expression, and the `use` is only for the functions you call.
 
 ```toml
 [dependencies]
-para = { path = "…/packages/para-html" }   # or a registry/git version once published
+para = { version = "^0.5", package = "para/html" }   # or a path dependency inside a checkout
+
+[directives]
+html = "para/html"
 ```
 
 The runnable apps are `examples/para-html/liveview-counter/` and `examples/para-html/liveview-todos/`.
