@@ -1,6 +1,10 @@
 [package]
 name = "para/html"
-version = "0.5.0"
+# 0.6.0 rather than 0.5.1: `serves` changed meaning at the root, from "claims every path" to "claims
+# the page's own three". That is what makes a root mount expressible, and it is a behavior change to
+# a `pub` predicate a host framework gates on, so it takes a minor bump even though no signature
+# moved. `handle` and every standalone page are unaffected.
+version = "0.6.0"
 # The minimum noeta this package works with; enforced at resolve time from noeta 0.2.1 on.
 toolchain = ">=0.5"
 license = "MIT OR Apache-2.0"

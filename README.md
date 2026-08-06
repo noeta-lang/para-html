@@ -23,7 +23,7 @@ One pure-Noeta module, `para.html`:
 
 ```toml
 [dependencies]
-para = { version = "^0.5", package = "para/html" }
+para = { version = "^0.6", package = "para/html" }
 
 # A tier is bound, never imported: this table is what makes `@html { … }` an expression in your
 # program. Add `css = "para/html"` too if you write `@css { … }` blocks.
@@ -173,9 +173,11 @@ Use `keyed` for any list a client edits — rows mutating in place *or* rows com
 
 `handle(req, title, render_page)` is the whole server surface. An app's `fn fetch(req)` delegates to it, so it runs under `noeta serve` like any `std.http.server` app. It routes three paths:
 
-- **any page path** — the server-rendered document: the template's static skeleton with every hole filled with its initial value (a no-flash first paint), plus a `<script src="…/live.js">` tag;
+- **any page path** — the server-rendered document: the template's static skeleton with every hole filled with its initial value (a no-flash first paint), plus a `<script src="…/live.js" data-live-ws="…/ws">` tag;
 - **`/live.js`** — the bundled client shim: a dependency-free script that connects the websocket, applies patches, and reports events (it reconnects automatically if the socket drops);
 - **`/ws`** — the websocket session that drives the live page.
+
+Under a `base:` all three move together. The socket URL rides on the script tag (`data-live-ws`) rather than being a client-side default, so the shim a mount serves connects to that mount's own socket; set `window.NOETA_LIVE_PATH` before the script to override it, which is the escape hatch for a proxy that rewrites paths.
 
 The session renders the page, builds a `view()` over the per-hole computeds, and sends a full `snapshot`. From then on, each client event looks up the element's inline handler by id in the page's dispatch table, runs it with the event payload, reconciles every keyed region (pushing structural frames first, so the content diff never re-pushes a fresh row or a gone one), and finally pushes the minimal `patch` of the holes whose rendered value changed:
 
@@ -203,9 +205,11 @@ handle(req, "Todos", page, base: "/todos", intercept: onion)  // mounted, with a
 
 ### Mounting under a prefix
 
-`base:` moves the page's three URLs under a prefix — `base: "/todos"` serves `/todos`, `/todos/ws`, and `/todos/live.js` — so a LiveView page can live beside other routes instead of owning the origin.
+`base:` moves the page's three URLs under a prefix — `base: "/todos"` serves `/todos`, `/todos/ws`, and `/todos/live.js` — so a LiveView page can live beside other routes instead of owning the origin. `""` and `"/"` are the same mount, the root one, serving `/`, `/ws`, and `/live.js`; a trailing slash is trimmed either way, so a base never produces a `//ws` nobody serves.
 
-The two modes differ in exactly one way, and it is deliberate. A page at the **root** (the default) answers *every* unmatched path, which is what makes a one-file app a whole site with no router. A **mounted** page answers exactly its three URLs; a mount that swallowed unmatched paths would quietly become the app's 404 handler for every route registered after it. `serves(base, path)` is that rule as a function, and a host framework should gate its mount with the same predicate rather than reimplementing it.
+`serves(base, path)` is "these three URLs are this page's", as a function — a host framework gates its mount with it rather than reimplementing it, and `handle` routes by it, so the two cannot disagree. It claims **exactly** those three at every base, the root included: an app whose live page is its home page still keeps `/health` and `/api/…` for the router beside it, and a mount that swallowed unmatched paths would quietly become the app's 404 handler for every route registered after it.
+
+The standalone page's catch-all is a property of `handle`, not of the mount: called directly, it renders the document for anything that is not the socket or the shim, which is what makes a one-file app a whole site with no router. Under a host framework that never fires, because only the claimed paths are handed over.
 
 Each mount serves its own copy of the shim rather than sharing one app-wide. The copies are identical and browser-cached per URL, and the alternative splits ownership of a para/html route between this package and whatever mounted it — which is how two modes start to drift.
 

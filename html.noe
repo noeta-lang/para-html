@@ -726,7 +726,13 @@ fn computed_string(c: dyn): string {
 fn live_js(): string {
     return `(() => {
   "use strict";
-  const path = window.NOETA_LIVE_PATH || "/ws";
+  // Where to open the socket. The server writes it onto this script tag as data-live-ws, derived
+  // from the same mount base the shim's own URL was, so a page mounted under a prefix connects to
+  // ITS socket rather than the root's — the two cannot drift, because one value produced both.
+  // window.NOETA_LIVE_PATH still wins when set: a deployment behind a proxy that rewrites paths is
+  // the case the server cannot know about.
+  const tag = document.currentScript;
+  const path = window.NOETA_LIVE_PATH || (tag && tag.dataset.liveWs) || "/ws";
   const state = {};
   let ws = null;
   const unescapeAttr = (s) => s.replace(/&quot;/g, '"').replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&");
@@ -802,13 +808,57 @@ fn live_js(): string {
 }
 
 // Wrap a rendered template in a full HTML document with the bundled client shim.
+//
+// The script tag carries the socket URL (`data-live-ws`) rather than leaving the shim to guess it.
+// Both URLs are built from the same normalized `base` here, in one expression, which is what keeps a
+// mounted page's shim pointed at the mount's own socket: the shim used to default to `/ws` whatever
+// prefix it had been served under, so every page mounted at a prefix loaded its client from
+// `<base>/live.js` and then tried to connect to a socket nobody was serving.
 fn document(title: string, page: Html, styles: ?Css, base: string): string {
+    root = base_root(base)
     style_tag = match styles {
         some(c) => "<style>${c.text}</style>",
         none => "",
     }
     head = "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>${title}</title>${style_tag}</head><body>\n"
-    return "${head}${page.skeleton}\n<script src=\"${base}/live.js\"></script></body></html>\n"
+    return "${head}${page.skeleton}\n<script src=\"${root}/live.js\" data-live-ws=\"${root}/ws\"></script></body></html>\n"
+}
+
+// A page with no holes — enough to serve, which is all `document` needs. Written out rather than
+// rendered through `@html` so the document tests state their own input and do not move when the
+// tier handler's markup does.
+fn bare_page(markup: string): Html {
+    return Html { skeleton: markup, holes: [], ids: [], handlers: {}, regions: [] }
+}
+
+// The served document tells the client where its socket is, and both URLs carry the mount. This is
+// the drift that made `base:` unusable: the shim was fetched from `<base>/live.js` and then opened
+// `/ws` regardless, so every mounted page loaded a client that connected to a socket the mount was
+// not serving — and at the root, where the two agree by accident, nothing showed it.
+@test fn a_mounted_document_points_its_shim_at_its_own_socket(): void {
+    doc = document("Todos", bare_page("<main></main>"), none, "/todos")
+    assert(doc.contains("src=\"/todos/live.js\""))
+    assert(doc.contains("data-live-ws=\"/todos/ws\""))
+}
+
+@test fn a_root_document_serves_the_unprefixed_urls(): void {
+    for base in ["", "/"] {
+        doc = document("Todos", bare_page("<main></main>"), none, base)
+        assert(doc.contains("src=\"/live.js\""))
+        assert(doc.contains("data-live-ws=\"/ws\""))
+        // The `"/"` spelling must not reach the markup as `//live.js`: a browser reads a
+        // protocol-relative URL there and asks a host named `live.js` for it.
+        assert(!doc.contains("//live.js"))
+        assert(!doc.contains("//ws"))
+    }
+}
+
+// The shim reads the attribute the document writes. Two halves of one protocol living in two
+// strings, so the pin is here: rename either side and this fails rather than the socket silently
+// falling back to the root's `/ws`.
+@test fn the_shim_reads_the_socket_url_off_its_own_script_tag(): void {
+    assert(live_js().contains("dataset.liveWs"))
+    assert(live_js().contains("document.currentScript"))
 }
 
 // One wake of a live session: a client frame, or an idle tick. The unit an interceptor layers over —
@@ -1009,19 +1059,76 @@ async fn session(
     return true
 }
 
-// Whether `path` belongs to a LiveView page mounted at `base` — the page itself, its websocket, or
-// its client shim. ONE predicate, used by `handle`'s own routing and by any host framework gating a
-// mount, so the two can never disagree about which URLs are a page's.
+// The mount prefix in its canonical form: no trailing slash, and the root spelled as the empty
+// string. `""` and `"/"` are the same mount and `"/todos/"` is the same mount as `"/todos"`, so the
+// three URLs are built from one normalized value instead of from whatever the caller typed —
+// `"/" ~ "/ws"` is `"//ws"`, a socket path no browser would ever ask for.
 //
-// A page at the **root** (`base == ""`, the standalone default) owns every path: an unmatched URL
-// still renders the page, which is what makes a one-file app a whole site with no router. A page
-// mounted at a **prefix** owns exactly its three URLs and nothing else — a mount that swallowed
-// every unmatched path would make it the app's 404 handler, which it is not.
-pub fn serves(base: string, path: string): bool {
-    if base == "" {
-        return true
+// Every place that turns a base into a URL or compares one goes through here: `serves`, `handle`,
+// and `document`. That is the point — the shim's `src`, the socket it connects to, and the predicate
+// a host framework gates the mount with are then three readings of a single rule.
+fn base_root(base: string): string {
+    if base == "/" {
+        return ""
     }
-    return path == base || path == base ~ "/" || path == base ~ "/ws" || path == base ~ "/live.js"
+    if base.ends_with("/") {
+        return base.slice(0, base.len() - 1)
+    }
+    return base
+}
+
+// Whether `path` is one of the three URLs a LiveView page mounted at `base` owns — the page itself,
+// its websocket, or its client shim. ONE predicate, used by `handle`'s own routing and by any host
+// framework gating a mount, so the two can never disagree about which URLs are a page's.
+//
+// A page mounted at the **root** (`""` or `"/"`) owns exactly `/`, `/ws` and `/live.js`, and nothing
+// else: it is the natural spelling for the app whose live page IS its home page, and it has to leave
+// `/health` and `/api/…` alone for the router beside it. This predicate used to answer `true` for
+// every path at the root, which made that app inexpressible — the one arrangement most apps want —
+// and left it hand-writing the three URLs in its own `fetch`.
+//
+// The standalone page's catch-all is unaffected and lives where it always did: `handle` renders the
+// document for any path that is not the socket or the shim, which is what makes a one-file app a
+// whole site with no router. That is a property of serving the page directly, not of where it is
+// mounted, so it belongs to `handle` rather than to this rule.
+pub fn serves(base: string, path: string): bool {
+    root = base_root(base)
+    return path == root || path == root ~ "/" || path == root ~ "/ws" || path == root ~ "/live.js"
+}
+
+// The three spellings of the root mount are one mount, and a trailing slash never reaches a URL.
+// `"/" ~ "/ws"` is the failure this rules out: a socket at `//ws` that nothing serves and no client
+// asks for.
+@test fn a_base_normalizes_to_one_canonical_prefix(): void {
+    assert(base_root("") == "")
+    assert(base_root("/") == "")
+    assert(base_root("/todos") == "/todos")
+    assert(base_root("/todos/") == "/todos")
+}
+
+// The root mount claims its own three URLs and NOTHING else — the property that lets a live page be
+// an app's home page while the router beside it keeps `/health` and `/api/todos`. Before this, the
+// root answered `true` for every path, so an app with both had to route the page by hand.
+@test fn a_root_mount_claims_three_urls_and_leaves_the_rest(): void {
+    for base in ["", "/"] {
+        assert(serves(base, "/"))
+        assert(serves(base, "/ws"))
+        assert(serves(base, "/live.js"))
+        assert(!serves(base, "/health"))
+        assert(!serves(base, "/api/todos"))
+    }
+}
+
+// A prefixed mount claims the prefix, with or without its trailing slash, and stays inside it: a
+// sibling whose name merely starts the same way (`/todos-archive`) is not this page's.
+@test fn a_prefixed_mount_claims_its_own_three_urls(): void {
+    assert(serves("/todos", "/todos"))
+    assert(serves("/todos", "/todos/"))
+    assert(serves("/todos", "/todos/ws"))
+    assert(serves("/todos", "/todos/live.js"))
+    assert(!serves("/todos", "/todos/other"))
+    assert(!serves("/todos", "/todos-archive"))
+    assert(!serves("/todos", "/ws"))
 }
 
 // Handle one request: the websocket upgrade (the diff-push session), the bundled client shim, or the
@@ -1050,10 +1157,13 @@ pub fn serves(base: string, path: string): bool {
 // be layered away; see `max_payload_chars`.
 //
 // `base` mounts the page under a prefix (`"/todos"` serves `/todos`, `/todos/ws`, `/todos/live.js`).
-// Empty — the default — is the standalone page at the root, which also answers every unmatched path.
-// Each mount serves its own copy of the shim rather than sharing one app-wide: the copies are
-// identical and browser-cached per URL, and the alternative splits ownership of a para/html route
-// between this package and whatever mounted it, which is how the two modes start to drift.
+// Empty — the default — is the page at the root, serving `/`, `/ws` and `/live.js`; called directly
+// like this it also answers every unmatched path, which is what makes a one-file app a whole site
+// with no router. Under a host framework that catch-all never fires, because the mount only hands
+// over the paths `serves` claims. `"/"` and a trailing slash are accepted and mean the same mount
+// (`base_root`). Each mount serves its own copy of the shim rather than sharing one app-wide: the
+// copies are identical and browser-cached per URL, and the alternative splits ownership of a
+// para/html route between this package and whatever mounted it, which is how the two modes drift.
 pub fn handle(
     req: Request,
     title: string,
@@ -1064,10 +1174,11 @@ pub fn handle(
     intercept: ?(Wake, () -> void) -> void = none,
     base: string = "",
 ): Response {
-    if req.path() == base ~ "/ws" {
+    root = base_root(base)
+    if req.path() == root ~ "/ws" {
         return server.websocket(fn(sock) => session(sock, render_page, every_ms, on_tick, req, intercept))
     }
-    if req.path() == base ~ "/live.js" {
+    if req.path() == root ~ "/live.js" {
         return server.response(200, live_js(), {"content-type": "application/javascript"})
     }
     return server.response(200, document(title, render_page(), styles, base), {"content-type": "text/html"})
