@@ -10,7 +10,7 @@ It ships as the **`para.html` package** (`packages/para-html/`): the `Html` type
 
 ```toml
 [dependencies]
-para = { version = "^0.5", package = "para/html" }   # or a path dependency inside a checkout
+para = { version = "^0.6", package = "para/html" }   # or a path dependency inside a checkout
 
 [directives]
 html = "para/html"
@@ -154,7 +154,9 @@ A payload cap and a frame-rate cap apply to every page unconditionally, in the s
 
 ## Mounting beside other routes
 
-`handle(req, title, page, base: "/todos")` moves the page's three URLs under a prefix, so a LiveView page can live beside an app's other routes instead of owning the origin. A page at the root still answers every unmatched path — that is what makes a one-file app a whole site with no router — while a mounted page answers exactly `/todos`, `/todos/ws`, and `/todos/live.js`. `serves(base, path)` is that rule as a function; a host framework gates its mount with it rather than reimplementing it. [para/aether_html](https://github.com/noeta-lang/para-aether-html)'s `LiveMount` is the aether-side wiring.
+`handle(req, title, page, base: "/todos")` moves the page's three URLs under a prefix, so a LiveView page can live beside an app's other routes instead of owning the origin. A mount answers exactly its three — `/todos`, `/todos/ws`, `/todos/live.js` — at every base including the root, where `""` and `"/"` mean the same thing and the URLs are `/`, `/ws`, `/live.js`. That is what lets an app's live page *be* its home page without swallowing `/health` and `/api/…` from the router beside it. `serves(base, path)` is the rule as a function; a host framework gates its mount with it rather than reimplementing it, and `handle` routes by it. The catch-all belongs to the standalone page instead: called directly, `handle` renders the document for any path that is not the socket or the shim, which is what makes a one-file app a whole site with no router.
+
+The served document carries the socket URL on the script tag (`<script src="/todos/live.js" data-live-ws="/todos/ws">`), so a mounted page's shim connects to that mount's socket rather than to a client-side `/ws` default. Both URLs come from the same normalized base, in one expression, which is what keeps them from drifting apart. [para/aether_html](https://github.com/noeta-lang/para-aether-html)'s `LiveMount` is the aether-side wiring.
 
 ## Current limitations
 

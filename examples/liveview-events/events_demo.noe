@@ -197,13 +197,21 @@ main()
         assert(html.within_limits(true, huge, html.max_frames_per_second() * 100))
     }
 
-    // A standalone page owns every path — an unmatched URL still renders it, which is what makes a
-    // one-file app a whole site with no router.
-    fn a_root_page_owns_every_path(): void {
-        assert(html.serves("", "/"))
-        assert(html.serves("", "/ws"))
-        assert(html.serves("", "/live.js"))
-        assert(html.serves("", "/anything/at/all"), "the root page is its own catch-all")
+    // A page mounted at the root owns its three URLs and no more, so an app can put its live page on
+    // `/` and still keep `/health` and `/api/…` for the router beside it. `""` and `"/"` are the same
+    // mount.
+    //
+    // The standalone page's catch-all did not move — it lives in `handle`, which renders the document
+    // for anything that is not the socket or the shim. It was `serves` answering `true` for every
+    // path at the root that made a root mount impossible to express.
+    fn a_root_page_owns_exactly_its_three_urls(): void {
+        for base in ["", "/"] {
+            assert(html.serves(base, "/"))
+            assert(html.serves(base, "/ws"))
+            assert(html.serves(base, "/live.js"))
+            assert(!html.serves(base, "/health"), "a root mount leaves the router its own routes")
+            assert(!html.serves(base, "/anything/at/all"))
+        }
     }
 
     // A mounted page owns exactly its three URLs. A mount that swallowed every unmatched path would
