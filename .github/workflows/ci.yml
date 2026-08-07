@@ -18,6 +18,13 @@ on:
   pull_request:
   # Callable as the release gate (release.yml runs the full CI before publishing).
   workflow_call:
+  # Runnable by hand. A push event is not a guarantee: during the GitHub Actions outage of
+  # 2026-08-06 webhook triggers were throttled, `main` was pushed, and no run was ever created for
+  # it — leaving the branch unverified with no way to ask for the verification, since a workflow
+  # with no `workflow_dispatch` cannot be started from the CLI or the UI. The release rule is that
+  # CI must be green on the exact commit before its tag, so "the event was dropped" must not be
+  # able to block a release indefinitely.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
