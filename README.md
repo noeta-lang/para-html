@@ -21,9 +21,15 @@ One pure-Noeta module, `para.html`:
 
 ## Installation
 
+```sh
+noeta add para/html
+```
+
+That asks the registry for the current release and writes the caret requirement for it, so no version is pinned here to go stale. It adds:
+
 ```toml
 [dependencies]
-para = { version = "^0.6", package = "para/html" }
+para = { version = "^X.Y", package = "para/html" }
 
 # A tier is bound, never imported: this table is what makes `@html { … }` an expression in your
 # program. Add `css = "para/html"` too if you write `@css { … }` blocks.
@@ -284,7 +290,7 @@ The full design write-up is in [`docs/LiveView.md`](docs/LiveView.md).
 
 ## Requirements
 
-noeta 0.5 or later, and nothing else. The runtime surface is pure Noeta — no `[trust]` entry, no native code in your program. (The repo does ship dev-only tier-body formatters for `noeta fmt`, declared `dev-native`; they are compiled into the dev toolchain and never into a build of yours.)
+The toolchain floor is declared as `toolchain` in `noeta.toml` and shown on the package's registry page; nothing else is required. The runtime surface is pure Noeta — no `[trust]` entry, no native code in your program. (The repo does ship dev-only tier-body formatters for `noeta fmt`, declared `dev-native`; they are compiled into the dev toolchain and never into a build of yours.)
 
 ## Development
 
