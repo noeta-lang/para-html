@@ -1,5 +1,5 @@
 [package]
-name = "noeta/liveview_events"
+name = "local/liveview_events"
 version = "0.1.0"
 
 [dependencies]

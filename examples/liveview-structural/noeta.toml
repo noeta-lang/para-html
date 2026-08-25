@@ -1,5 +1,5 @@
 [package]
-name = "noeta/liveview_structural"
+name = "local/liveview_structural"
 version = "0.1.0"
 
 [dependencies]

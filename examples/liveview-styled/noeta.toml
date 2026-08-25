@@ -1,5 +1,5 @@
 [package]
-name = "noeta/liveview_styled"
+name = "local/liveview_styled"
 version = "0.1.0"
 
 [dependencies]
