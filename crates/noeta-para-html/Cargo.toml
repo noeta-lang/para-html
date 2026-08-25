@@ -12,7 +12,7 @@ rust-version = "1.95"
 # contract, so it must not cost this manifest an edit. The composed toolchain rewrites it onto the
 # consumer's own toolchain source via a `[patch]` (see `compose.rs::toolchain_patch_section`) so the
 # `dyn Extension` vtables unify — the range therefore governs this repo's CI, not consumers.
-noeta-ext-abi = "0.6"
+noeta-ext-abi = "0.7"
 # The pure-Rust CSS formatter behind the `"css"` body formatter. Optional and behind the `fmt`
 # feature: a default build ships an EMPTY extension (no malva, `body_formatters()` returns `&[]`),
 # so a prod/consumer build links no CSS formatter. Only the dev toolchain builds `--features fmt`.
